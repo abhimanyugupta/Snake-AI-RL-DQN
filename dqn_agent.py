@@ -508,10 +508,17 @@ class DQNAgent:
                 }
             )
 
+        dominant_path_nodes = []
+        for layer in layers:
+            nodes = layer.get("nodes", [])
+            if nodes:
+                dominant_path_nodes.append(nodes[0]["label"])
+
         return {
             "architecture_label": self.architecture_label,
             "layers": layers,
             "connection_blocks": connection_blocks,
+            "dominant_path": " -> ".join(dominant_path_nodes),
             "top_inputs": [
                 {
                     "label": node["label"],
@@ -705,6 +712,7 @@ class DQNAgent:
             "columns": columns,
             "cells": [
                 {
+                    "rank": index,
                     "label": node["short_label"],
                     "full_label": node["label"],
                     "value": float(node["value"]),
@@ -712,7 +720,7 @@ class DQNAgent:
                     "positive": bool(node.get("positive", True)),
                     "chosen": bool(node.get("chosen", False)),
                 }
-                for node in nodes
+                for index, node in enumerate(nodes)
             ],
         }
 

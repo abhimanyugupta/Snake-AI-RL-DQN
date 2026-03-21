@@ -70,6 +70,16 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - compact connection-strength blocks between adjacent layers
   - summary cards for top inputs, hidden-layer highlights, and outputs
 - the `Algorithm` view is now a short card-based explanation instead of a long dense text stack
+- fixed the `Training Snapshot` cards so metric values sit cleanly inside their boxes
+- improved the headless or `No Render` behavior when the window is open:
+  - the toggle now repaints immediately
+  - the graph now refreshes after each completed run in headless mode
+- added score-axis labels to the training graph for easier reading
+- improved the network page further with:
+  - a dominant-path summary
+  - a color legend
+  - stronger layer accenting
+  - clearer top-node highlighting
 
 ## Validation completed
 

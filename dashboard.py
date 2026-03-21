@@ -179,6 +179,7 @@ class TrainingDashboard:
         initial_delay_ms,
         initial_episode_goal,
         initial_reward_config=None,
+        initial_headless=False,
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -187,7 +188,7 @@ class TrainingDashboard:
         }
 
         padding = 20
-        start_y = padding + 46 + 42 + 52 + (7 * 34) + 26
+        start_y = padding + 46 + 42 + 52 + (7 * 42) + 26
         col_w = (game.sidebar_width - (padding * 2) - 20) // 2
         col_x = game.board_w + padding
         slider_width = col_w
@@ -256,7 +257,7 @@ class TrainingDashboard:
         )
         y += 38
         self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 28)
-        self.headless_toggle = ToggleControl("No Render [H]", False, col_x + toggle_w + 10, y, toggle_w, 28)
+        self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 28)
         y += 36
         self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 28)
         self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 28)

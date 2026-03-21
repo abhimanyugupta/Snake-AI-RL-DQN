@@ -231,6 +231,37 @@ def save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_tr
     agent.save(checkpoint_path, extra_state=extra_state)
 
 
+def draw_dashboard_frame(
+    game,
+    dashboard,
+    agent,
+    state,
+    action_info,
+    current_game_number,
+    episode_goal,
+    best_score,
+    context,
+    overlay_title=None,
+    overlay_subtitle=None,
+):
+    frame = dashboard.build_dashboard_data(
+        agent=agent,
+        game=game,
+        state=state,
+        action_info=action_info,
+        current_game_number=current_game_number,
+        episode_goal=episode_goal,
+        best_score=best_score,
+        context=context,
+    )
+    if overlay_title:
+        frame["overlay_title"] = overlay_title
+    if overlay_subtitle:
+        frame["overlay_subtitle"] = overlay_subtitle
+    game.set_dashboard_data(frame)
+    game.draw()
+
+
 def train_session(
     episodes,
     render,
@@ -264,6 +295,7 @@ def train_session(
         initial_delay_ms=delay_ms,
         initial_episode_goal=episodes,
         initial_reward_config=initial_reward_config,
+        initial_headless=not render,
     )
     dashboard.load_deep_history(deep_history)
     if comparison_mode and baseline_history:
@@ -298,14 +330,35 @@ def train_session(
                 episode_goal = dashboard.get_episode_goal()
                 events = pygame.event.get() if render else []
                 dashboard.sync_graph_rect(game)
+                headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)
                 game.handle_system_events(events)
+                headless_changed = dashboard.headless_toggle.value != headless_before_events
 
                 if game.quit_requested:
                     break
 
                 game.speed = 0 if dashboard.headless_toggle.value else dashboard.current_fps
                 game.set_reward_config(dashboard.reward_config)
+
+                if render and headless_changed:
+                    preview_info = agent.get_action_details(state, greedy=True)
+                    draw_dashboard_frame(
+                        game=game,
+                        dashboard=dashboard,
+                        agent=agent,
+                        state=state,
+                        action_info=preview_info,
+                        current_game_number=current_game_number,
+                        episode_goal=episode_goal,
+                        best_score=best_score,
+                        context={
+                            "mode_label": "Training",
+                            "episode_reward": episode_reward,
+                            "train_info": agent.last_train_info,
+                            "transition": last_transition,
+                        },
+                    )
 
                 if dashboard.pause_toggle.value:
                     preview_info = agent.get_action_details(state, greedy=True)
@@ -431,6 +484,25 @@ def train_session(
             )
             append_metric_entry(metrics_log_path, metric_entry)
 
+            if render and dashboard.headless_toggle.value:
+                summary_action = agent.get_action_details(state, greedy=True)
+                draw_dashboard_frame(
+                    game=game,
+                    dashboard=dashboard,
+                    agent=agent,
+                    state=state,
+                    action_info=summary_action,
+                    current_game_number=current_game_number,
+                    episode_goal=dashboard.get_episode_goal(),
+                    best_score=best_score,
+                    context={
+                        "mode_label": "Headless training",
+                        "episode_reward": episode_reward,
+                        "train_info": agent.last_train_info,
+                        "transition": last_transition,
+                    },
+                )
+
             if agent.n_games % checkpoint_every == 0 or score == best_score:
                 save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_transition)
 
@@ -473,6 +545,7 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
         initial_delay_ms=40,
         initial_episode_goal=max(1, len(deep_history.get("scores", []))),
         initial_reward_config=checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG),
+        initial_headless=False,
     )
     dashboard.load_deep_history(deep_history)
     if baseline_history:
@@ -493,8 +566,10 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
             while not game.quit_requested:
                 events = pygame.event.get()
                 dashboard.sync_graph_rect(game)
+                headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)
                 game.handle_system_events(events)
+                headless_changed = dashboard.headless_toggle.value != headless_before_events
 
                 if game.quit_requested:
                     break
@@ -520,6 +595,9 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
                         context=context,
                     )
                 )
+
+                if headless_changed:
+                    game.draw()
 
                 if dashboard.pause_toggle.value:
                     game.draw()

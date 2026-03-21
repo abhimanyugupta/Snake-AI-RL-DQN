@@ -521,7 +521,7 @@ class SnakeGameAI:
             left_col.height,
         )
         metrics_rows = max(1, (len(data.get("metrics", [])) + 1) // 2)
-        metrics_h = 52 + metrics_rows * 34
+        metrics_h = 52 + metrics_rows * 42
         metrics_rect = pygame.Rect(overview_rect.x, overview_rect.y, overview_rect.width, metrics_h)
         self._draw_metrics_card(metrics_rect, data.get("metrics", []))
 
@@ -634,7 +634,7 @@ class SnakeGameAI:
         inner_w = rect.width - 24
         col_gap = 10
         col_w = (inner_w - col_gap) // 2
-        row_h = 34
+        row_h = 42
 
         for index, (label, value) in enumerate(metrics):
             col = index % 2
@@ -643,14 +643,15 @@ class SnakeGameAI:
                 inner_x + col * (col_w + col_gap),
                 inner_y + row * row_h,
                 col_w,
-                row_h - 6,
+                row_h - 4,
             )
             pygame.draw.rect(self.display, (22, 25, 31), card_rect, border_radius=8)
             pygame.draw.rect(self.display, (52, 58, 68), card_rect, width=1, border_radius=8)
             label_surface = self.tiny_font.render(str(label).upper(), True, (134, 142, 154))
             value_surface = self.tiny_font.render(str(value), True, (238, 242, 249))
-            self.display.blit(label_surface, (card_rect.x + 8, card_rect.y + 5))
-            self.display.blit(value_surface, (card_rect.x + 8, card_rect.y + 18))
+            self.display.blit(label_surface, (card_rect.x + 8, card_rect.y + 6))
+            value_y = card_rect.bottom - value_surface.get_height() - 6
+            self.display.blit(value_surface, (card_rect.x + 8, value_y))
 
     def _estimate_text_card_height(self, lines, width):
         base = 48
@@ -764,7 +765,20 @@ class SnakeGameAI:
         )
         self.display.blit(architecture, (rect.right - 18 - architecture.get_width(), rect.y + 14))
 
-        plot_rect = pygame.Rect(rect.x + 16, rect.y + 60, rect.width - 32, rect.height - 76)
+        dominant_path = network.get("dominant_path")
+        header_bottom = rect.y + 56
+        if dominant_path:
+            path_surface = self.tiny_font.render(
+                f"Dominant path: {dominant_path}",
+                True,
+                (255, 214, 110),
+            )
+            self.display.blit(path_surface, (rect.x + 12, rect.y + 52))
+            header_bottom += 18
+
+        self._draw_network_legend(rect.right - 270, rect.y + 50)
+
+        plot_rect = pygame.Rect(rect.x + 16, header_bottom + 8, rect.width - 32, rect.bottom - header_bottom - 24)
         pygame.draw.rect(self.display, (20, 22, 26), plot_rect, border_radius=8)
         pygame.draw.rect(self.display, (45, 50, 58), plot_rect, width=1, border_radius=8)
 
@@ -816,6 +830,8 @@ class SnakeGameAI:
 
     def _draw_layer_heatmap_card(self, rect, layer):
         pygame.draw.rect(self.display, (26, 29, 35), rect, border_radius=8)
+        accent = self._layer_accent_color(layer.get("kind", "hidden"))
+        pygame.draw.rect(self.display, accent, (rect.x + 1, rect.y + 1, rect.width - 2, 5), border_radius=8)
         pygame.draw.rect(self.display, (55, 60, 70), rect, width=1, border_radius=8)
 
         title_surface = self.tiny_font.render(layer.get("title", "Layer"), True, (235, 240, 248))
@@ -858,6 +874,7 @@ class SnakeGameAI:
         chosen = bool(cell.get("chosen", False))
         positive = bool(cell.get("positive", True))
         value = float(cell.get("value", 0.0))
+        rank = int(cell.get("rank", 999))
 
         if chosen:
             fill = (190 + int(65 * strength), 150 + int(40 * strength), 60)
@@ -876,6 +893,8 @@ class SnakeGameAI:
                 58,
             )
             border = (235, 110, 118)
+        if rank == 0 and not chosen:
+            border = (235, 240, 248)
 
         pygame.draw.rect(self.display, fill, rect, border_radius=6)
         pygame.draw.rect(self.display, border, rect, width=2 if chosen else 1, border_radius=6)
@@ -937,6 +956,27 @@ class SnakeGameAI:
         )
         summary_surface = self.tiny_font.render(summary_text, True, (150, 156, 168))
         self.display.blit(summary_surface, (rect.x + 8, rect.bottom - 18))
+
+    def _draw_network_legend(self, x, y):
+        items = [
+            ((70, 190, 240), "positive"),
+            ((235, 110, 118), "negative"),
+            ((255, 214, 110), "chosen"),
+            ((235, 240, 248), "top node"),
+        ]
+        cursor_x = x
+        for color, label in items:
+            pygame.draw.circle(self.display, color, (cursor_x + 5, y + 7), 5)
+            label_surface = self.tiny_font.render(label, True, (168, 174, 184))
+            self.display.blit(label_surface, (cursor_x + 14, y))
+            cursor_x += 22 + label_surface.get_width()
+
+    def _layer_accent_color(self, kind):
+        if kind == "input":
+            return (80, 190, 255)
+        if kind == "output":
+            return (255, 196, 68)
+        return (80, 220, 180)
 
     def _draw_controls(self, data):
         for section in data.get("control_sections", []):
@@ -1132,21 +1172,58 @@ class SnakeGameAI:
         view_end = max(view_size, min(total, int(view_end)))
         view_start = max(0, view_end - view_size)
 
-        plot_rect = pygame.Rect(rect.x + 15, legend_y + 24, rect.width - 30, rect.height - (legend_y - rect.y) - 54)
+        plot_rect = pygame.Rect(
+            rect.x + 46,
+            legend_y + 24,
+            rect.width - 60,
+            rect.height - (legend_y - rect.y) - 54,
+        )
 
         pygame.draw.rect(self.display, (20, 22, 26), plot_rect, border_radius=4)
         pygame.draw.rect(self.display, (40, 42, 48), plot_rect, width=1, border_radius=4)
-
-        pygame.draw.line(
-            self.display, (60, 65, 75),
-            (plot_rect.x, plot_rect.bottom), (plot_rect.right, plot_rect.bottom), 1,
-        )
 
         max_value = 1
         for item in series:
             values = item.get("values", [])[view_start:view_end]
             if values:
                 max_value = max(max_value, max(values))
+
+        tick_count = 4
+        for tick in range(tick_count + 1):
+            ratio = tick / tick_count
+            y = plot_rect.bottom - int(ratio * plot_rect.height)
+            tick_value = max_value * ratio
+            pygame.draw.line(
+                self.display,
+                (44, 48, 56),
+                (plot_rect.x, y),
+                (plot_rect.right, y),
+                1,
+            )
+            label_surface = self.tiny_font.render(
+                self._format_axis_value(tick_value),
+                True,
+                (150, 156, 168),
+            )
+            self.display.blit(
+                label_surface,
+                (rect.x + 8, y - (label_surface.get_height() // 2)),
+            )
+
+        pygame.draw.line(
+            self.display,
+            (80, 86, 98),
+            (plot_rect.x, plot_rect.y),
+            (plot_rect.x, plot_rect.bottom),
+            1,
+        )
+        pygame.draw.line(
+            self.display,
+            (80, 86, 98),
+            (plot_rect.x, plot_rect.bottom),
+            (plot_rect.right, plot_rect.bottom),
+            1,
+        )
 
         for item in series:
             values = item.get("values", [])[view_start:view_end]
@@ -1194,6 +1271,10 @@ class SnakeGameAI:
         range_text = f"Episodes {view_start + 1}-{view_end} of {total}"
         range_surf = self.tiny_font.render(range_text, True, (140, 145, 155))
         self.display.blit(range_surf, (rect.right - 15 - range_surf.get_width(), rect.y + 12))
+        start_label = self.tiny_font.render(str(view_start + 1), True, (150, 156, 168))
+        end_label = self.tiny_font.render(str(view_end), True, (150, 156, 168))
+        self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, bar_y - 18))
+        self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, bar_y - 18))
 
     def _draw_graph_line(self, rect, values, max_value, color, thickness=2):
         if len(values) < 2:
@@ -1213,6 +1294,13 @@ class SnakeGameAI:
         if len(points) >= 2:
             # Draw premium smoothed line
             pygame.draw.lines(self.display, color, False, points, thickness)
+
+    def _format_axis_value(self, value):
+        if value >= 10:
+            return f"{value:.0f}"
+        if value >= 1:
+            return f"{value:.1f}"
+        return f"{value:.2f}"
 
     def _draw_overlay_message(self):
         title = self.dashboard_data.get("overlay_title")
