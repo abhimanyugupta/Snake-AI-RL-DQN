@@ -662,7 +662,7 @@ class SnakeGameAI:
             )
             self._draw_text_card(comparison_rect, "Comparison Notes", comparison_lines)
 
-        q_h = max(140, min(176, int(right_content.height * 0.30)))
+        q_h = max(146, min(176, int(right_content.height * 0.30)))
         q_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, q_h)
         if data.get("q_values") is not None:
             self._draw_q_values(q_rect, data)
@@ -671,15 +671,29 @@ class SnakeGameAI:
         right_content.height -= q_h + 15
 
         replay_data = data.get("recent_replays")
-        if replay_data and right_content.height > 120:
-            replay_h = min(
-                180,
-                max(
-                    122,
-                    self._estimate_recent_replays_card_height(replay_data, right_content.width),
-                ),
+        graph_min_h = 170
+        replay_h = 0
+        if replay_data:
+            replay_estimate = self._estimate_recent_replays_card_height(
+                replay_data,
+                right_content.width,
             )
-            replay_h = min(replay_h, max(122, right_content.height - 120))
+            replay_min_h = 96 if replay_data.get("buttons") else 68
+            replay_budget = max(0, right_content.height - graph_min_h - 15)
+            replay_h = min(replay_estimate, replay_budget)
+            if replay_h < replay_min_h:
+                replay_h = 0
+
+        graph_h = right_content.height - (replay_h + 15 if replay_h else 0)
+        graph_h = max(120, graph_h)
+        graph_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, graph_h)
+        data["_graph_rect"] = graph_rect
+        self._draw_graph(graph_rect, data)
+        
+        right_content.y += graph_h + (15 if replay_h else 0)
+        right_content.height -= graph_h
+
+        if replay_h:
             replay_rect = pygame.Rect(
                 right_content.x,
                 right_content.y,
@@ -687,24 +701,6 @@ class SnakeGameAI:
                 replay_h,
             )
             self._draw_recent_replays_card(replay_rect, replay_data)
-            right_content.y += replay_h + 15
-            right_content.height -= replay_h + 15
-
-        has_state_block = bool(data.get("state_lines") or data.get("help_lines"))
-        reserve_for_state = 96 if has_state_block else 0
-        graph_h = min(
-            right_content.height,
-            max(110, min(280, right_content.height - reserve_for_state)),
-        )
-        graph_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, graph_h)
-        data["_graph_rect"] = graph_rect
-        self._draw_graph(graph_rect, data)
-
-        right_content.y += graph_h + 15
-        right_content.height -= graph_h + 15
-
-        if has_state_block and right_content.height > 70:
-            self._draw_state_block(right_content, data)
 
     def _draw_card_background(self, rect):
         """Draw a premium dark card with subtle borders."""
@@ -1276,7 +1272,7 @@ class SnakeGameAI:
             self.display.blit(value_surface, (bar_x + bar_w + 8, bar_y + 2))
 
     def _estimate_recent_replays_card_height(self, replay_data, width):
-        base = 48
+        base = 44
         line_count = 0
         for line in replay_data.get("lines", []):
             wrapped = self._wrap_text(str(line), self.tiny_font, width - 24)
@@ -1284,7 +1280,8 @@ class SnakeGameAI:
         footer = replay_data.get("footer", "")
         if footer:
             line_count += max(1, len(self._wrap_text(str(footer), self.tiny_font, width - 24)))
-        return base + line_count * 18 + len(replay_data.get("buttons", [])) * 34 + 18
+        button_rows = 1 if replay_data.get("buttons") else 0
+        return base + line_count * 16 + button_rows * 34 + 10
 
     def _draw_recent_replays_card(self, rect, replay_data):
         self._draw_card_background(rect)
@@ -1297,37 +1294,45 @@ class SnakeGameAI:
 
         y = rect.y + 36
         max_width = rect.width - 24
-        for line in replay_data.get("lines", []):
+        lines = list(replay_data.get("lines", []))
+        max_lines = 3 if replay_data.get("buttons") else 2
+        for line in lines[:max_lines]:
             wrapped_lines = self._wrap_text(str(line), self.tiny_font, max_width)
             for wrapped in wrapped_lines:
                 line_surface = self.tiny_font.render(wrapped, True, (196, 202, 212))
                 self.display.blit(line_surface, (rect.x + 12, y))
-                y += 18
+                y += 16
 
-        button_w = rect.width - 24
-        button_h = 28
-        button_gap = 6
-        for button in replay_data.get("buttons", []):
-            button_rect = pygame.Rect(rect.x + 12, y, button_w, button_h)
-            button["x"] = button_rect.x
-            button["y"] = button_rect.y
-            button["w"] = button_rect.width
-            button["h"] = button_rect.height
+        buttons = replay_data.get("buttons", [])
+        if buttons:
+            y += 4
+            button_gap = 8
+            button_h = 28
+            button_count = max(1, len(buttons))
+            button_w = max(88, (rect.width - 24 - button_gap * (button_count - 1)) // button_count)
+            button_x = rect.x + 12
+            for button in buttons:
+                button_rect = pygame.Rect(button_x, y, button_w, button_h)
+                button["x"] = button_rect.x
+                button["y"] = button_rect.y
+                button["w"] = button_rect.width
+                button["h"] = button_rect.height
 
-            pygame.draw.rect(self.display, (58, 116, 188), button_rect, border_radius=6)
-            pygame.draw.rect(self.display, (120, 205, 255), button_rect, width=2, border_radius=6)
-            label_surface = self.tiny_font.render(button.get("label", "Replay"), True, (255, 255, 255))
-            label_rect = label_surface.get_rect(center=button_rect.center)
-            self.display.blit(label_surface, label_rect)
-            y += button_h + button_gap
+                pygame.draw.rect(self.display, (58, 116, 188), button_rect, border_radius=6)
+                pygame.draw.rect(self.display, (120, 205, 255), button_rect, width=2, border_radius=6)
+                label_surface = self.tiny_font.render(button.get("label", "Replay"), True, (255, 255, 255))
+                label_rect = label_surface.get_rect(center=button_rect.center)
+                self.display.blit(label_surface, label_rect)
+                button_x += button_w + button_gap
+            y += button_h + 6
 
         footer = replay_data.get("footer")
         if footer and y < rect.bottom - 14:
             footer_lines = self._wrap_text(str(footer), self.tiny_font, max_width)
-            for wrapped in footer_lines:
+            for wrapped in footer_lines[:1]:
                 footer_surface = self.tiny_font.render(wrapped, True, (132, 192, 245))
                 self.display.blit(footer_surface, (rect.x + 12, y))
-                y += 18
+                y += 16
 
     def _draw_state_block(self, rect, data):
         lines = list(data.get("state_lines", [])) + list(data.get("help_lines", []))
@@ -1504,8 +1509,8 @@ class SnakeGameAI:
         self.display.blit(range_surf, (rect.right - 15 - range_surf.get_width(), rect.y + 12))
         start_label = self.tiny_font.render(str(view_start + 1), True, (150, 156, 168))
         end_label = self.tiny_font.render(str(view_end), True, (150, 156, 168))
-        self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, bar_y - 18))
-        self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, bar_y - 18))
+        self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, plot_rect.bottom + 2))
+        self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, plot_rect.bottom + 2))
 
     def _draw_graph_line(self, rect, values, max_value, color, thickness=2):
         if len(values) < 2:
