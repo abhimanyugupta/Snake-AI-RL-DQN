@@ -73,7 +73,9 @@ Notes:
 - `--fast-mode` strips most per-step visualization work and animates only the final tail episodes
 - `--fast-tail-episodes` controls how many ending episodes stay fully animated in fast mode
 - fast mode skips tabular-baseline generation and hides baseline series while it is active
-- when a rendered fast-mode session finishes, the UI can replay the last 3 recorded fast episodes from on-screen buttons
+- when a rendered fast-mode session finishes, the UI can replay the last 3 recorded fast episodes from both the board overlay and a `Recent Replays` card in `Overview`
+- the `Recent Replays` card also explains why replay is unavailable when `Fast Mode`, `No Render`, or `Keep open` prevent capture
+- stripped fast episodes now run uncapped, while the final animated tail keeps the full teaching dashboard
 
 ## Visualizer
 
@@ -112,7 +114,8 @@ py -3 visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metric
 Rendered training sessions now wait for an on-screen `Start` button, so you can choose the runtime device first.
 If `No Render` is enabled, training auto-starts and keeps updating the graph in the open window after each episode.
 `Fast Mode [X]` is available in the training UI and applies from the next episode boundary, not in the middle of the current run.
-After a rendered fast-mode session completes, the finish overlay can replay the last 3 recorded runs without keeping older episode replays in memory.
+After a rendered fast-mode session completes, the finish overlay and `Overview` sidebar can replay the last 3 recorded runs without keeping older episode replays in memory.
+The overview also shows lightweight throughput feedback during training, including episode steps, environment steps per second, and optimizer updates per second.
 
 ## Current implementation note
 

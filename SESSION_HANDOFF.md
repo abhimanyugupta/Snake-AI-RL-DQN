@@ -107,8 +107,21 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - fast mode skips tabular-baseline generation while active
   - fast mode strips most per-step dashboard work for early episodes
   - the final tail episodes stay fully animated
-  - after a rendered fast-mode session completes, the overlay can replay the last 3 recorded fast runs
+  - after a rendered fast-mode session completes, both the overlay and the `Overview` sidebar can replay the last 3 recorded fast runs
   - replay history is kept in memory only and capped to the latest 3 episodes
+  - the `Overview` sidebar now explains exactly why replay is unavailable when:
+    - fast mode is off
+    - `No Render` is on
+    - `Keep open` is off
+  - the final training screen now forces `Overview` mode so the replay card is visible immediately
+  - stripped fast episodes now avoid the full per-step action-detail path and run without FPS pacing
+  - throughput feedback is now surfaced in the dashboard and console:
+    - episode steps
+    - env steps/sec
+    - updates/sec
+  - fast-mode diagnostics now avoid forcing detailed GPU-to-CPU scalar sync on every single training step
+  - snake collision checks now use a body-occupancy set instead of repeated list scans
+  - the free-space state features now raycast against walls plus the occupancy set
 - made network inspection lazy:
   - `agent.inspect_network(...)` is no longer built on every dashboard refresh
   - the heavy network payload is now built only when the `Network` tab is active
@@ -137,6 +150,9 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - fast mode can skip heavy per-step rendering work while keeping episode history updates
   - fast mode keeps the final tail episodes fully animated when rendering is on
   - the fast-mode finish overlay can replay the latest 3 recorded fast runs
+  - the sidebar replay card is populated from the same latest-3 in-memory replay list
+  - stripped fast episodes no longer request pacing through `play_step(...)`
+  - the DQN fast path can choose actions without building full Q-value payloads every step
 
 ## Blocked / not yet verified
 
@@ -154,6 +170,11 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - the new on-screen `Start`, `CPU`, and `GPU` buttons in a real pygame session
   - the new `Fast Mode [X]` toggle and final-tail animation behavior in a real pygame session
   - the new fast-mode replay buttons after training completes
+  - the new `Recent Replays` sidebar card after training completes
+  - the replay-unavailable reason text in the sidebar under:
+    - default mode
+    - `No Render`
+    - `Keep open` off
   - actual pygame layout behavior with different window updates and longer runs
 
 ## Next recommended steps
@@ -209,7 +230,7 @@ Check for:
 ## Good continuation targets for another Codex session
 
 - do the real runtime smoke tests and fix any behavioral bugs found there
-- profile the remaining training cost after fast mode to see whether state encoding or RL batch updates are now the next bottleneck
+- profile the remaining training cost after fast mode to see whether replay-buffer sampling or tensor-transfer overhead is now the next bottleneck
 - polish the `Network` page further if a very deep architecture makes columns too narrow
 - add screenshots or a visual verification checklist to `README.md`
 - optionally add richer checkpoint browsing or per-layer statistics if you want a more research-lab feel

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import os
+import time
 from collections import deque
 
 try:
@@ -86,8 +87,21 @@ def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_l
 def hold_training_window_open(game, dashboard, recent_episode_replays=None):
     pygame.event.clear()
     recent_episode_replays = list(recent_episode_replays or [])
+    recent_replays_panel = build_recent_replays_panel(
+        dashboard,
+        recent_episode_replays,
+        fast_mode_requested=dashboard.fast_mode_toggle.value,
+        fast_mode_effective=dashboard.fast_mode_toggle.value,
+        fast_tail_episodes=len(recent_episode_replays),
+        training_completed=True,
+    )
     game.set_dashboard_data(
-        build_training_finished_view(game.dashboard_data, game, recent_episode_replays)
+        build_training_finished_view(
+            game.dashboard_data,
+            game,
+            recent_episode_replays,
+            recent_replays_panel=recent_replays_panel,
+        )
     )
 
     while not game.quit_requested:
@@ -113,7 +127,11 @@ def hold_training_window_open(game, dashboard, recent_episode_replays=None):
                 if requested_index < len(recent_episode_replays):
                     replay_index = requested_index
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                for button in game.dashboard_data.get("overlay_buttons", []):
+                replay_buttons = list(game.dashboard_data.get("overlay_buttons", []))
+                replay_buttons.extend(
+                    game.dashboard_data.get("recent_replays", {}).get("buttons", [])
+                )
+                for button in replay_buttons:
                     rect = pygame.Rect(
                         button["x"],
                         button["y"],
@@ -129,7 +147,12 @@ def hold_training_window_open(game, dashboard, recent_episode_replays=None):
             if game.quit_requested:
                 return
             game.set_dashboard_data(
-                build_training_finished_view(game.dashboard_data, game, recent_episode_replays)
+                build_training_finished_view(
+                    game.dashboard_data,
+                    game,
+                    recent_episode_replays,
+                    recent_replays_panel=recent_replays_panel,
+                )
             )
             continue
 
@@ -314,8 +337,91 @@ def build_replay_overlay_buttons(game, recent_episode_replays):
     return buttons
 
 
-def build_training_finished_view(base_view, game, recent_episode_replays):
+def build_recent_replay_button_specs(recent_episode_replays):
+    buttons = []
+    for index, replay in enumerate(recent_episode_replays):
+        buttons.append(
+            {
+                "replay_index": index,
+                "label": f"Run {replay['run_number']} | Score {replay['score']}",
+            }
+        )
+    return buttons
+
+
+def build_recent_replays_panel(
+    dashboard,
+    recent_episode_replays,
+    *,
+    fast_mode_requested,
+    fast_mode_effective,
+    fast_tail_episodes,
+    training_completed=False,
+):
+    replays = list(recent_episode_replays or [])
+    panel = {
+        "title": "Recent Replays",
+        "lines": [],
+        "buttons": [],
+        "footer": "",
+    }
+
+    if training_completed and replays:
+        panel["lines"] = [
+            f"Latest {len(replays)} captured fast-mode tail run(s).",
+            "Click a run below or press 1/2/3 to replay it on the board.",
+        ]
+        panel["buttons"] = build_recent_replay_button_specs(replays)
+        panel["footer"] = "Only the newest 3 runs are kept in memory."
+        return panel
+
+    if not (fast_mode_requested or fast_mode_effective):
+        panel["lines"] = [
+            "Replay capture is only available in Fast Mode.",
+            "Turn on Fast Mode [X] to keep the latest 3 animated tail runs.",
+        ]
+        return panel
+
+    if dashboard.headless_toggle.value:
+        panel["lines"] = [
+            "Replay capture is disabled while No Render is on.",
+            "Turn off No Render [H] to capture the animated tail runs.",
+        ]
+        return panel
+
+    if not dashboard.keep_open_toggle.value:
+        panel["lines"] = [
+            "Replay controls stay visible only when Keep open is enabled.",
+            "Turn on Keep open [K] before training finishes.",
+        ]
+        return panel
+
+    if training_completed:
+        panel["lines"] = [
+            "No animated tail replays were captured in this session.",
+            "Fast-mode tail episodes must finish rendered to appear here.",
+        ]
+        return panel
+
+    panel["lines"] = [
+        "Fast mode will keep the newest 3 animated tail runs in memory.",
+        f"The final {max(1, int(fast_tail_episodes))} episode(s) become replayable here after training finishes.",
+    ]
+    if fast_mode_requested and fast_mode_requested != fast_mode_effective:
+        panel["lines"].append("Fast mode is queued and will apply from the next episode.")
+    if replays:
+        panel["footer"] = f"Captured so far this session: {len(replays)}/3"
+    return panel
+
+
+def build_training_finished_view(
+    base_view,
+    game,
+    recent_episode_replays,
+    recent_replays_panel=None,
+):
     final_view = dict(base_view or {})
+    final_view["view_mode"] = "overview"
     final_view["overlay_title"] = "Training finished"
     if recent_episode_replays:
         final_view["overlay_subtitle"] = (
@@ -325,6 +431,8 @@ def build_training_finished_view(base_view, game, recent_episode_replays):
     else:
         final_view["overlay_subtitle"] = "Press Enter, Q, Esc, or close the window."
         final_view["overlay_buttons"] = []
+    if recent_replays_panel is not None:
+        final_view["recent_replays"] = recent_replays_panel
     return final_view
 
 
@@ -368,6 +476,15 @@ def play_episode_replay(game, episode_replay):
         pygame.time.delay(55)
 
 
+def build_live_train_info(train_info, session_perf, episode_steps):
+    info = dict(train_info or {})
+    elapsed = max(1e-6, time.perf_counter() - session_perf["start_time"])
+    info["episode_steps"] = int(max(0, episode_steps))
+    info["env_steps_per_sec"] = float(session_perf["env_steps"] / elapsed)
+    info["updates_per_sec"] = float(session_perf["updates"] / elapsed)
+    return info
+
+
 def build_training_context(
     mode_label,
     episode_reward,
@@ -391,7 +508,7 @@ def build_training_context(
     }
 
 
-def draw_dashboard_frame(
+def build_dashboard_frame(
     game,
     dashboard,
     agent,
@@ -404,6 +521,7 @@ def draw_dashboard_frame(
     *,
     lightweight=False,
     show_baseline=True,
+    recent_replays_panel=None,
     overlay_title=None,
     overlay_subtitle=None,
 ):
@@ -419,10 +537,48 @@ def draw_dashboard_frame(
         lightweight=lightweight,
         show_baseline=show_baseline,
     )
+    if recent_replays_panel is not None:
+        frame["recent_replays"] = recent_replays_panel
     if overlay_title:
         frame["overlay_title"] = overlay_title
     if overlay_subtitle:
         frame["overlay_subtitle"] = overlay_subtitle
+    return frame
+
+
+def draw_dashboard_frame(
+    game,
+    dashboard,
+    agent,
+    state,
+    action_info,
+    current_game_number,
+    episode_goal,
+    best_score,
+    context,
+    *,
+    lightweight=False,
+    show_baseline=True,
+    recent_replays_panel=None,
+    overlay_title=None,
+    overlay_subtitle=None,
+):
+    frame = build_dashboard_frame(
+        game=game,
+        dashboard=dashboard,
+        agent=agent,
+        state=state,
+        action_info=action_info,
+        current_game_number=current_game_number,
+        episode_goal=episode_goal,
+        best_score=best_score,
+        context=context,
+        lightweight=lightweight,
+        show_baseline=show_baseline,
+        recent_replays_panel=recent_replays_panel,
+        overlay_title=overlay_title,
+        overlay_subtitle=overlay_subtitle,
+    )
     game.set_dashboard_data(frame)
     game.draw()
 
@@ -517,6 +673,11 @@ def train_session(
     last_transition = checkpoint_state.get("last_transition", {"reward_text": "n/a"})
     fast_tail_episodes = max(1, int(fast_tail_episodes))
     recent_episode_replays = deque(maxlen=3)
+    session_perf = {
+        "start_time": time.perf_counter(),
+        "env_steps": 0,
+        "updates": 0,
+    }
 
     try:
         while True:
@@ -559,6 +720,43 @@ def train_session(
                 and animated_tail_episode
             )
 
+            def current_recent_replays_panel(training_completed=False):
+                return build_recent_replays_panel(
+                    dashboard,
+                    recent_episode_replays,
+                    fast_mode_requested=dashboard.fast_mode_toggle.value,
+                    fast_mode_effective=episode_fast_mode,
+                    fast_tail_episodes=fast_tail_episodes,
+                    training_completed=training_completed,
+                )
+
+            def current_context(
+                mode_label,
+                *,
+                train_info_override=None,
+                episode_steps_override=None,
+                remaining_override=None,
+            ):
+                train_info = build_live_train_info(
+                    train_info_override if train_info_override is not None else agent.last_train_info,
+                    session_perf,
+                    step_count if episode_steps_override is None else episode_steps_override,
+                )
+                return build_training_context(
+                    mode_label,
+                    episode_reward,
+                    train_info,
+                    last_transition,
+                    fast_mode_requested=dashboard.fast_mode_toggle.value,
+                    fast_mode_effective=episode_fast_mode,
+                    fast_tail_episodes=fast_tail_episodes,
+                    episodes_remaining=(
+                        episodes_remaining
+                        if remaining_override is None
+                        else remaining_override
+                    ),
+                )
+
             while True:
                 episode_goal = dashboard.get_episode_goal()
                 events = pygame.event.get() if render else []
@@ -587,18 +785,10 @@ def train_session(
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=build_training_context(
-                            "Training",
-                            episode_reward,
-                            agent.last_train_info,
-                            last_transition,
-                            fast_mode_requested=dashboard.fast_mode_toggle.value,
-                            fast_mode_effective=episode_fast_mode,
-                            fast_tail_episodes=fast_tail_episodes,
-                            episodes_remaining=episodes_remaining,
-                        ),
+                        context=current_context("Training"),
                         lightweight=stripped_episode,
                         show_baseline=episode_show_baseline,
+                        recent_replays_panel=current_recent_replays_panel(),
                     )
 
                 if not dashboard.started:
@@ -616,18 +806,10 @@ def train_session(
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=build_training_context(
-                            "Ready to start",
-                            episode_reward,
-                            agent.last_train_info,
-                            last_transition,
-                            fast_mode_requested=dashboard.fast_mode_toggle.value,
-                            fast_mode_effective=episode_fast_mode,
-                            fast_tail_episodes=fast_tail_episodes,
-                            episodes_remaining=episodes_remaining,
-                        ),
+                        context=current_context("Ready to start"),
                         lightweight=False,
                         show_baseline=episode_show_baseline,
+                        recent_replays_panel=current_recent_replays_panel(),
                         overlay_title="Press Start",
                         overlay_subtitle="Click Start [Enter] to begin training.",
                     )
@@ -636,28 +818,20 @@ def train_session(
 
                 if dashboard.pause_toggle.value:
                     preview_info = agent.get_action_details(state, greedy=True)
-                    context = build_training_context(
-                        "Paused",
-                        episode_reward,
-                        agent.last_train_info,
-                        last_transition,
-                        fast_mode_requested=dashboard.fast_mode_toggle.value,
-                        fast_mode_effective=episode_fast_mode,
-                        fast_tail_episodes=fast_tail_episodes,
-                        episodes_remaining=episodes_remaining,
-                    )
                     game.set_dashboard_data(
-                        dashboard.build_dashboard_data(
-                            agent=agent,
+                        build_dashboard_frame(
                             game=game,
+                            dashboard=dashboard,
+                            agent=agent,
                             state=state,
                             action_info=preview_info,
                             current_game_number=current_game_number,
                             episode_goal=episode_goal,
                             best_score=best_score,
-                            context=context,
+                            context=current_context("Paused"),
                             lightweight=stripped_episode,
                             show_baseline=episode_show_baseline,
+                            recent_replays_panel=current_recent_replays_panel(),
                         )
                     )
                     if render:
@@ -667,33 +841,31 @@ def train_session(
                         pygame.time.delay(5)
                     continue
 
-                action_info = agent.get_action_details(state)
+                action_info = agent.get_action_selection(
+                    state,
+                    lightweight=stripped_episode,
+                )
                 step_count += 1
                 live_render_enabled = (
                     render and not dashboard.headless_toggle.value and not stripped_episode
                 )
 
                 if live_render_enabled:
-                    frame_data = dashboard.build_dashboard_data(
-                        agent=agent,
+                    frame_data = build_dashboard_frame(
                         game=game,
+                        dashboard=dashboard,
+                        agent=agent,
                         state=state,
                         action_info=action_info,
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=build_training_context(
-                            "Fast tail" if animated_tail_episode else "Training",
-                            episode_reward,
-                            agent.last_train_info,
-                            last_transition,
-                            fast_mode_requested=dashboard.fast_mode_toggle.value,
-                            fast_mode_effective=episode_fast_mode,
-                            fast_tail_episodes=fast_tail_episodes,
-                            episodes_remaining=episodes_remaining,
+                        context=current_context(
+                            "Fast tail" if animated_tail_episode else "Training"
                         ),
                         lightweight=False,
                         show_baseline=episode_show_baseline,
+                        recent_replays_panel=current_recent_replays_panel(),
                     )
                     game.set_dashboard_data(frame_data)
                     if capture_episode_replay:
@@ -707,6 +879,7 @@ def train_session(
                     action_info["action"],
                     events=[],
                     draw_frame=False,
+                    apply_pacing=not dashboard.headless_toggle.value and not stripped_episode,
                 )
                 episode_reward += reward
                 next_state = agent.encode_state(game)
@@ -717,7 +890,13 @@ def train_session(
                     next_state=next_state,
                     done=game_over,
                 )
-                train_info = agent.train_step()
+                session_perf["env_steps"] += 1
+                collect_diagnostics = bool(
+                    not stripped_episode or game_over or (step_count % 64 == 0)
+                )
+                train_info = agent.train_step(collect_diagnostics=collect_diagnostics)
+                if train_info.get("did_update"):
+                    session_perf["updates"] += 1
                 state = next_state
                 last_transition = {
                     "reward_text": f"{reward:+.2f}",
@@ -726,26 +905,22 @@ def train_session(
                 }
 
                 if render and game_over and not dashboard.headless_toggle.value and not stripped_episode:
-                    final_view = dashboard.build_dashboard_data(
-                        agent=agent,
+                    final_view = build_dashboard_frame(
                         game=game,
+                        dashboard=dashboard,
+                        agent=agent,
                         state=state,
                         action_info=action_info,
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=build_training_context(
+                        context=current_context(
                             "Fast tail" if animated_tail_episode else "Training",
-                            episode_reward,
-                            train_info,
-                            last_transition,
-                            fast_mode_requested=dashboard.fast_mode_toggle.value,
-                            fast_mode_effective=episode_fast_mode,
-                            fast_tail_episodes=fast_tail_episodes,
-                            episodes_remaining=episodes_remaining,
+                            train_info_override=train_info,
                         ),
                         lightweight=False,
                         show_baseline=episode_show_baseline,
+                        recent_replays_panel=current_recent_replays_panel(),
                     )
                     final_view["overlay_title"] = "Episode finished"
                     final_view["overlay_subtitle"] = f"Reward: {reward:+.2f}"
@@ -803,32 +978,31 @@ def train_session(
                     current_game_number=current_game_number,
                     episode_goal=dashboard.get_episode_goal(),
                     best_score=best_score,
-                    context=build_training_context(
+                    context=current_context(
                         "Fast pass" if stripped_episode else "Headless training",
-                        episode_reward,
-                        agent.last_train_info,
-                        last_transition,
-                        fast_mode_requested=dashboard.fast_mode_toggle.value,
-                        fast_mode_effective=episode_fast_mode,
-                        fast_tail_episodes=fast_tail_episodes,
-                        episodes_remaining=max(
+                        remaining_override=max(
                             0,
                             dashboard.get_episode_goal() - (agent.n_games - session_start_games),
                         ),
                     ),
                     lightweight=stripped_episode,
                     show_baseline=episode_show_baseline,
+                    recent_replays_panel=current_recent_replays_panel(),
                 )
 
             if agent.n_games % checkpoint_every == 0 or score == best_score:
                 save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_transition)
 
+            perf_info = build_live_train_info(agent.last_train_info, session_perf, step_count)
             print(
                 f"Run {current_game_number:>4}/{dashboard.get_episode_goal():<4} | "
                 f"Total games: {agent.n_games:>4} | "
                 f"Score: {score:>2} | "
                 f"Best: {best_score:>2} | "
                 f"Epsilon: {agent.epsilon:.3f} | "
+                f"Episode steps: {step_count:>4} | "
+                f"Env/s: {perf_info.get('env_steps_per_sec', 0.0):6.1f} | "
+                f"Updates/s: {perf_info.get('updates_per_sec', 0.0):6.1f} | "
                 f"Buffer: {len(agent.replay_buffer)} | "
                 f"Loss: {agent.last_train_info.get('loss')} | "
                 f"Mode: {'fast' if episode_fast_mode else 'default'}"

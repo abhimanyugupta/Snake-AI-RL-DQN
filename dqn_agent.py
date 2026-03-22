@@ -265,7 +265,7 @@ class DQNAgent:
         return " -> ".join(str(size) for size in layer_sizes)
 
     def get_action(self, state: np.ndarray) -> List[int]:
-        return self.get_action_details(state)["action"]
+        return self.get_action_selection(state)["action"]
 
     def set_device(self, device_preference: str) -> bool:
         normalized = normalize_device_preference(device_preference)
@@ -284,26 +284,27 @@ class DQNAgent:
         return True
 
     def get_action_details(self, state: np.ndarray, greedy: bool = False) -> dict:
-        q_values = self.get_q_values(state)
+        return self.get_action_selection(state, greedy=greedy, lightweight=False)
 
+    def get_action_selection(
+        self, state: np.ndarray, greedy: bool = False, lightweight: bool = False
+    ) -> dict:
         if not greedy and random.random() < self.epsilon:
             action_index = random.randint(0, len(self.ACTION_LABELS) - 1)
             decision_type = "explore"
+            q_values = [] if lightweight else self.get_q_values(state)
         else:
-            best_value = max(q_values)
-            best_actions = [
-                index for index, value in enumerate(q_values) if value == best_value
-            ]
-            action_index = random.choice(best_actions)
+            q_tensor = self._get_q_tensor(state)
+            action_index = self._select_best_action_index_from_q_tensor(q_tensor)
             decision_type = "policy preview" if greedy else "exploit"
+            q_values = None if lightweight else self._q_tensor_to_list(q_tensor)
 
-        return self._build_action_details(action_index, q_values, decision_type)
+        if lightweight:
+            return self._build_action_summary(action_index, decision_type)
+        return self._build_action_details(action_index, q_values or [], decision_type)
 
     def get_q_values(self, state: np.ndarray) -> List[float]:
-        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            q_tensor = self.policy_net(state_tensor.unsqueeze(0)).squeeze(0)
-        return [float(value) for value in q_tensor.detach().cpu().tolist()]
+        return self._q_tensor_to_list(self._get_q_tensor(state))
 
     def remember(
         self,
@@ -315,7 +316,7 @@ class DQNAgent:
     ) -> None:
         self.replay_buffer.add(state, action_index, reward, next_state, done)
 
-    def train_step(self) -> dict:
+    def train_step(self, collect_diagnostics: bool = True) -> dict:
         buffer_size = len(self.replay_buffer)
         if buffer_size < max(self.batch_size, self.warmup_size):
             info = {
@@ -329,6 +330,7 @@ class DQNAgent:
                 "synced_target": False,
                 "target_sync_remaining": self.target_sync_interval,
                 "grad_norm": None,
+                "did_update": False,
             }
             self.last_train_info = info
             return info
@@ -355,9 +357,7 @@ class DQNAgent:
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        grad_norm = float(
-            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
-        )
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
         self.optimizer.step()
 
         self.train_steps += 1
@@ -368,20 +368,39 @@ class DQNAgent:
 
         info = {
             "status": "training",
-            "loss": float(loss.detach().cpu().item()),
-            "td_error": float(td_error.detach().abs().mean().cpu().item()),
-            "predicted_q": float(predicted_selected.detach().mean().cpu().item()),
-            "target_q": float(target.detach().mean().cpu().item()),
             "buffer_size": buffer_size,
             "warmup_remaining": 0,
             "synced_target": synced_target,
             "target_sync_remaining": self.target_sync_interval
             - (self.train_steps % self.target_sync_interval),
-            "example_predicted_q": float(predicted_selected[0].detach().cpu().item()),
-            "example_target_q": float(target[0].detach().cpu().item()),
-            "example_td_error": float(td_error[0].detach().cpu().item()),
-            "grad_norm": grad_norm,
+            "did_update": True,
         }
+        if collect_diagnostics:
+            info.update(
+                {
+                    "loss": float(loss.detach().cpu().item()),
+                    "td_error": float(td_error.detach().abs().mean().cpu().item()),
+                    "predicted_q": float(predicted_selected.detach().mean().cpu().item()),
+                    "target_q": float(target.detach().mean().cpu().item()),
+                    "example_predicted_q": float(predicted_selected[0].detach().cpu().item()),
+                    "example_target_q": float(target[0].detach().cpu().item()),
+                    "example_td_error": float(td_error[0].detach().cpu().item()),
+                    "grad_norm": float(grad_norm.detach().cpu().item()),
+                }
+            )
+        else:
+            info.update(
+                {
+                    "loss": self.last_train_info.get("loss"),
+                    "td_error": self.last_train_info.get("td_error"),
+                    "predicted_q": self.last_train_info.get("predicted_q"),
+                    "target_q": self.last_train_info.get("target_q"),
+                    "example_predicted_q": self.last_train_info.get("example_predicted_q"),
+                    "example_target_q": self.last_train_info.get("example_target_q"),
+                    "example_td_error": self.last_train_info.get("example_td_error"),
+                    "grad_norm": self.last_train_info.get("grad_norm"),
+                }
+            )
         self.last_train_info = info
         return info
 
@@ -829,6 +848,31 @@ class DQNAgent:
             "q_values": list(q_values),
         }
 
+    def _build_action_summary(self, action_index: int, decision_type: str) -> dict:
+        return {
+            "action": self.index_to_action(action_index),
+            "action_index": action_index,
+            "action_key": self.ACTION_KEYS[action_index],
+            "action_label": self.ACTION_LABELS[action_index],
+            "decision_type": decision_type,
+        }
+
+    def _get_q_tensor(self, state: np.ndarray):
+        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            return self.policy_net(state_tensor.unsqueeze(0)).squeeze(0)
+
+    def _q_tensor_to_list(self, q_tensor) -> List[float]:
+        return [float(value) for value in q_tensor.detach().cpu().tolist()]
+
+    def _select_best_action_index_from_q_tensor(self, q_tensor) -> int:
+        best_value = q_tensor.max()
+        best_indices = torch.nonzero(q_tensor == best_value, as_tuple=False).flatten()
+        if best_indices.numel() <= 1:
+            return int(best_indices[0].item())
+        choice = best_indices[torch.randint(best_indices.numel(), (1,), device=best_indices.device)]
+        return int(choice.item())
+
     def _move_optimizer_state_to_device(self) -> None:
         for state in self.optimizer.state.values():
             for key, value in list(state.items()):
@@ -838,13 +882,7 @@ class DQNAgent:
     def _free_space_ratio(
         self, game, start: Point, direction: Direction, max_travel: float
     ) -> float:
-        steps = 0
-        current = start
-        while True:
-            current = self._next_point(current, direction, game.block_size)
-            if game.is_collision(current):
-                break
-            steps += 1
+        steps = game.raycast_free_steps(start, direction)
         return float(steps / max_travel)
 
     def _next_point(self, head: Point, direction: Direction, block_size: int) -> Point:

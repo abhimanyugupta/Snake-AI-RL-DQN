@@ -159,6 +159,7 @@ class SnakeGameAI:
             Point(start_x - self.block_size, start_y),
             Point(start_x - (2 * self.block_size), start_y),
         ]
+        self.snake_body_set = set(self.snake[1:])
 
         self.score = 0
         self.food = None
@@ -200,10 +201,10 @@ class SnakeGameAI:
             x = random.randint(0, max_x) * self.block_size
             y = random.randint(0, max_y) * self.block_size
             self.food = Point(x, y)
-            if self.food not in self.snake:
+            if self.food != self.head and self.food not in self.snake_body_set:
                 break
 
-    def play_step(self, action=None, events=None, draw_frame=True):
+    def play_step(self, action=None, events=None, draw_frame=True, apply_pacing=True):
         """
         Advance the game by one frame.
 
@@ -230,7 +231,9 @@ class SnakeGameAI:
         else:
             self._move(action)
 
+        previous_head = self.snake[0]
         self.snake.insert(0, self.head)
+        self.snake_body_set.add(previous_head)
         reward = self.reward_config["step"]
         game_over = False
 
@@ -243,12 +246,14 @@ class SnakeGameAI:
             reward = self.reward_config["food"]
             self._place_food()
         else:
-            self.snake.pop()
+            tail = self.snake.pop()
+            self.snake_body_set.discard(tail)
 
         if self.render and draw_frame:
             self._draw_scene()
 
-        self.clock.tick(self.speed)
+        if apply_pacing and self.speed > 0:
+            self.clock.tick(self.speed)
         return reward, game_over, self.score
 
     def is_collision(self, point=None):
@@ -256,13 +261,30 @@ class SnakeGameAI:
         if point is None:
             point = self.head
 
-        if point.x < 0 or point.x >= self.board_w or point.y < 0 or point.y >= self.board_h:
+        if self._is_wall_collision(point):
             return True
 
-        if point in self.snake[1:]:
+        if point in self.snake_body_set:
             return True
 
         return False
+
+    def raycast_free_steps(self, start, direction):
+        steps = 0
+        current = start
+        while True:
+            current = self._point_from_direction(current, direction)
+            if self._is_wall_collision(current) or current in self.snake_body_set:
+                return steps
+            steps += 1
+
+    def _is_wall_collision(self, point):
+        return (
+            point.x < 0
+            or point.x >= self.board_w
+            or point.y < 0
+            or point.y >= self.board_h
+        )
 
     def _handle_human_input(self, events):
         """Allow the player to move with arrow keys or WASD."""
@@ -648,7 +670,32 @@ class SnakeGameAI:
         right_content.y += q_h + 15
         right_content.height -= q_h + 15
 
-        graph_h = max(150, min(280, right_content.height - 96))
+        replay_data = data.get("recent_replays")
+        if replay_data and right_content.height > 120:
+            replay_h = min(
+                180,
+                max(
+                    122,
+                    self._estimate_recent_replays_card_height(replay_data, right_content.width),
+                ),
+            )
+            replay_h = min(replay_h, max(122, right_content.height - 120))
+            replay_rect = pygame.Rect(
+                right_content.x,
+                right_content.y,
+                right_content.width,
+                replay_h,
+            )
+            self._draw_recent_replays_card(replay_rect, replay_data)
+            right_content.y += replay_h + 15
+            right_content.height -= replay_h + 15
+
+        has_state_block = bool(data.get("state_lines") or data.get("help_lines"))
+        reserve_for_state = 96 if has_state_block else 0
+        graph_h = min(
+            right_content.height,
+            max(110, min(280, right_content.height - reserve_for_state)),
+        )
         graph_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, graph_h)
         data["_graph_rect"] = graph_rect
         self._draw_graph(graph_rect, data)
@@ -656,7 +703,7 @@ class SnakeGameAI:
         right_content.y += graph_h + 15
         right_content.height -= graph_h + 15
 
-        if data.get("state_lines") or data.get("help_lines"):
+        if has_state_block and right_content.height > 70:
             self._draw_state_block(right_content, data)
 
     def _draw_card_background(self, rect):
@@ -1227,6 +1274,60 @@ class SnakeGameAI:
 
             value_surface = self.tiny_font.render(f"{value:.2f}", True, (240, 245, 255))
             self.display.blit(value_surface, (bar_x + bar_w + 8, bar_y + 2))
+
+    def _estimate_recent_replays_card_height(self, replay_data, width):
+        base = 48
+        line_count = 0
+        for line in replay_data.get("lines", []):
+            wrapped = self._wrap_text(str(line), self.tiny_font, width - 24)
+            line_count += max(1, len(wrapped))
+        footer = replay_data.get("footer", "")
+        if footer:
+            line_count += max(1, len(self._wrap_text(str(footer), self.tiny_font, width - 24)))
+        return base + line_count * 18 + len(replay_data.get("buttons", [])) * 34 + 18
+
+    def _draw_recent_replays_card(self, rect, replay_data):
+        self._draw_card_background(rect)
+        title_surface = self.small_font.render(
+            replay_data.get("title", "Recent Replays"),
+            True,
+            (250, 252, 255),
+        )
+        self.display.blit(title_surface, (rect.x + 12, rect.y + 10))
+
+        y = rect.y + 36
+        max_width = rect.width - 24
+        for line in replay_data.get("lines", []):
+            wrapped_lines = self._wrap_text(str(line), self.tiny_font, max_width)
+            for wrapped in wrapped_lines:
+                line_surface = self.tiny_font.render(wrapped, True, (196, 202, 212))
+                self.display.blit(line_surface, (rect.x + 12, y))
+                y += 18
+
+        button_w = rect.width - 24
+        button_h = 28
+        button_gap = 6
+        for button in replay_data.get("buttons", []):
+            button_rect = pygame.Rect(rect.x + 12, y, button_w, button_h)
+            button["x"] = button_rect.x
+            button["y"] = button_rect.y
+            button["w"] = button_rect.width
+            button["h"] = button_rect.height
+
+            pygame.draw.rect(self.display, (58, 116, 188), button_rect, border_radius=6)
+            pygame.draw.rect(self.display, (120, 205, 255), button_rect, width=2, border_radius=6)
+            label_surface = self.tiny_font.render(button.get("label", "Replay"), True, (255, 255, 255))
+            label_rect = label_surface.get_rect(center=button_rect.center)
+            self.display.blit(label_surface, label_rect)
+            y += button_h + button_gap
+
+        footer = replay_data.get("footer")
+        if footer and y < rect.bottom - 14:
+            footer_lines = self._wrap_text(str(footer), self.tiny_font, max_width)
+            for wrapped in footer_lines:
+                footer_surface = self.tiny_font.render(wrapped, True, (132, 192, 245))
+                self.display.blit(footer_surface, (rect.x + 12, y))
+                y += 18
 
     def _draw_state_block(self, rect, data):
         lines = list(data.get("state_lines", [])) + list(data.get("help_lines", []))

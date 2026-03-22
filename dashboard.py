@@ -635,6 +635,9 @@ class TrainingDashboard:
                 f"Episodes remaining in this session: {episodes_remaining}",
                 f"Warmup remaining: {train_info.get('warmup_remaining', 0)}",
                 f"Replay buffer fill: {train_info.get('buffer_size', 0)}",
+                f"Episode steps: {train_info.get('episode_steps', 0)}",
+                f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
+                f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
                 f"Current device: {agent.device_label}",
             ]
             help_lines = [
@@ -662,6 +665,9 @@ class TrainingDashboard:
                     f"Food view: {agent.explain_food_view(state)}",
                     f"Warmup remaining: {train_info.get('warmup_remaining', 0)}",
                     f"Replay buffer fill: {train_info.get('buffer_size', 0)}",
+                    f"Episode steps: {train_info.get('episode_steps', 0)}",
+                    f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
+                    f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
                 ]
             )
             help_lines = [
@@ -946,3 +952,8 @@ class TrainingDashboard:
         if value is None:
             return "warming up"
         return f"{value:.4f}"
+
+    def _format_rate(self, value):
+        if value is None:
+            return "0.0"
+        return f"{float(value):.1f}"
