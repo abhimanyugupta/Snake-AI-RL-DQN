@@ -773,6 +773,12 @@ class SnakeGameAI:
         if not network:
             self._draw_text_card(rect, "Network View", ["Waiting for network data..."])
             return
+        if network.get("message"):
+            lines = [str(network["message"])]
+            if network.get("details"):
+                lines.extend(str(item) for item in network.get("details", []))
+            self._draw_text_card(rect, "Network View", lines)
+            return
 
         diagram_h = int(rect.height * 0.58)
         diagram_rect = pygame.Rect(rect.x, rect.y, rect.width, diagram_h)
@@ -851,9 +857,17 @@ class SnakeGameAI:
                 (255, 214, 110),
             )
             self.display.blit(path_surface, (rect.x + 12, rect.y + 52))
-            header_bottom += 18
-
-        self._draw_network_legend(rect.right - 270, rect.y + 50)
+            
+            legend_x = rect.x + 12 + path_surface.get_width() + 20
+            if legend_x > rect.right - 270:
+                # If path text is long, push legend down
+                self._draw_network_legend(rect.right - 270, rect.y + 70)
+                header_bottom += 36
+            else:
+                self._draw_network_legend(rect.right - 270, rect.y + 50)
+                header_bottom += 18
+        else:
+            self._draw_network_legend(rect.right - 270, rect.y + 50)
 
         plot_rect = pygame.Rect(rect.x + 16, header_bottom + 8, rect.width - 32, rect.bottom - header_bottom - 24)
         pygame.draw.rect(self.display, (20, 22, 26), plot_rect, border_radius=8)
@@ -933,7 +947,7 @@ class SnakeGameAI:
         grid_rect = pygame.Rect(rect.x + 8, rect.y + 62, rect.width - 16, rect.height - 70)
         cell_gap = 6
         cell_w = max(22, (grid_rect.width - cell_gap * (columns - 1)) // columns)
-        cell_h = max(28, (grid_rect.height - cell_gap * (rows - 1)) // rows)
+        cell_h = max(26, (grid_rect.height - cell_gap * (rows - 1)) // rows)
 
         for index, cell in enumerate(cells):
             row = index // columns
@@ -977,12 +991,22 @@ class SnakeGameAI:
         pygame.draw.rect(self.display, border, rect, width=2 if chosen else 1, border_radius=6)
 
         label = cell.get("label", "")
-        while label and self.tiny_font.size(label)[0] > (rect.width - 12):
+        # Adjust label length depending on cell width
+        while label and self.tiny_font.size(label)[0] > (rect.width - 8):
             label = label[:-1]
+            
         label_surface = self.tiny_font.render(label, True, (245, 248, 252))
         value_surface = self.tiny_font.render(f"{value:+.2f}", True, (245, 248, 252))
-        self.display.blit(label_surface, (rect.x + 6, rect.y + 5))
-        self.display.blit(value_surface, (rect.x + 6, rect.bottom - 17))
+        
+        if rect.height < 32:
+            if rect.width > 60:
+                self.display.blit(label_surface, (rect.x + 4, rect.y + (rect.height - label_surface.get_height()) // 2))
+                self.display.blit(value_surface, (rect.right - value_surface.get_width() - 4, rect.y + (rect.height - value_surface.get_height()) // 2))
+            else:
+                self.display.blit(value_surface, (rect.x + (rect.width - value_surface.get_width()) // 2, rect.y + (rect.height - value_surface.get_height()) // 2))
+        else:
+            self.display.blit(label_surface, (rect.x + 6, rect.y + 5))
+            self.display.blit(value_surface, (rect.x + 6, rect.bottom - 17))
 
     def _draw_connection_heatmap_block(self, rect, block):
         pygame.draw.rect(self.display, (24, 26, 31), rect, border_radius=8)
@@ -1424,6 +1448,14 @@ class SnakeGameAI:
         subtitle_rect = subtitle_surface.get_rect(center=(self.board_w // 2, self.board_h // 2 + 16))
         self.display.blit(title_surface, title_rect)
         self.display.blit(subtitle_surface, subtitle_rect)
+
+        for button in self.dashboard_data.get("overlay_buttons", []):
+            rect = pygame.Rect(button["x"], button["y"], button["w"], button["h"])
+            pygame.draw.rect(self.display, (58, 116, 188), rect, border_radius=8)
+            pygame.draw.rect(self.display, (120, 205, 255), rect, width=2, border_radius=8)
+            label_surface = self.small_font.render(button.get("label", "Replay"), True, (255, 255, 255))
+            label_rect = label_surface.get_rect(center=rect.center)
+            self.display.blit(label_surface, label_rect)
 
     def _clamp_point_to_board(self, point):
         max_x = self.board_w - self.block_size

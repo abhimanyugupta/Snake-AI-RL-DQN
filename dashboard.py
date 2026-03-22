@@ -185,6 +185,7 @@ class TrainingDashboard:
         initial_device_preference="cpu",
         cuda_available=False,
         require_manual_start=False,
+        initial_fast_mode=False,
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -265,7 +266,7 @@ class TrainingDashboard:
         self.show_graph_toggle = ToggleControl("Graph [G]", True, col_x, y, toggle_w, 26)
         self.pause_toggle = ToggleControl("Pause [Space]", False, col_x + toggle_w + 10, y, toggle_w, 26)
         self.start_button = ButtonControl("Start [Enter]", col_x + toggle_w + 10, y, toggle_w, 26, "start")
-        y += 32
+        y += 48
         self.turbo_toggle = ToggleControl("Turbo [T]", False, col_x, y, toggle_w, 26)
         self.episode_input = TextInputControl(
             "Episode goal",
@@ -275,15 +276,18 @@ class TrainingDashboard:
             toggle_w,
             28,
         )
-        y += 34
-        
-        y += 18
+        y += 36
         self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 26)
         self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 26)
         y += 32
+
+        self.fast_mode_toggle = ToggleControl("Fast Mode [X]", bool(initial_fast_mode), col_x, y, slider_width, 26)
+        y += 32
+
         self.cpu_device_button = ButtonControl("CPU [C]", col_x, y, toggle_w, 26, "device_cpu")
         self.gpu_device_button = ButtonControl("GPU [U]", col_x + toggle_w + 10, y, toggle_w, 26, "device_cuda")
         y += 32
+
         self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 26)
         self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 26)
         y += 32
@@ -303,6 +307,7 @@ class TrainingDashboard:
             self.turbo_toggle,
             self.keep_open_toggle,
             self.headless_toggle,
+            self.fast_mode_toggle,
             self.show_scores_toggle,
             self.show_avg_toggle,
             self.show_best_toggle,
@@ -332,6 +337,7 @@ class TrainingDashboard:
         self.graph_drag_start_end = 0
         self.graph_hover_index = None
         self.graph_rect = None
+        self.baseline_visible = True
 
     @property
     def current_fps(self):
@@ -397,6 +403,9 @@ class TrainingDashboard:
         self.baseline_best_history = list(history.get("best_scores", []))
         self.baseline_episode_rewards = list(history.get("episode_rewards", []))
 
+    def set_baseline_visibility(self, visible):
+        self.baseline_visible = bool(visible)
+
     def record_deep_episode(self, score, episode_reward):
         self.deep_scores.append(score)
         self.deep_episode_rewards.append(float(episode_reward))
@@ -414,11 +423,17 @@ class TrainingDashboard:
     def graph_total_points(self):
         total = 0
         if self.show_scores_toggle.value:
-            total = max(total, len(self.deep_scores), len(self.baseline_scores))
+            total = max(total, len(self.deep_scores))
+            if self.baseline_visible:
+                total = max(total, len(self.baseline_scores))
         if self.show_avg_toggle.value:
-            total = max(total, len(self.deep_average_history), len(self.baseline_average_history))
+            total = max(total, len(self.deep_average_history))
+            if self.baseline_visible:
+                total = max(total, len(self.baseline_average_history))
         if self.show_best_toggle.value:
-            total = max(total, len(self.deep_best_history), len(self.baseline_best_history))
+            total = max(total, len(self.deep_best_history))
+            if self.baseline_visible:
+                total = max(total, len(self.baseline_best_history))
         return total
 
     def handle_events(self, events):
@@ -540,6 +555,8 @@ class TrainingDashboard:
             self.keep_open_toggle.toggle()
         elif key == pygame.K_h:
             self.headless_toggle.toggle()
+        elif key == pygame.K_x:
+            self.fast_mode_toggle.toggle()
         elif key == pygame.K_c:
             self._handle_control_button("device_cpu")
         elif key == pygame.K_u:
@@ -587,32 +604,79 @@ class TrainingDashboard:
         episode_goal,
         best_score,
         context,
+        lightweight=False,
+        show_baseline=None,
     ):
-        candidate_points = game.get_relative_points()
-        deadly_moves = {key: game.is_collision(point) for key, point in candidate_points.items()}
+        show_baseline = self.baseline_visible if show_baseline is None else bool(show_baseline)
+        include_network = self.view_mode == "network" and not lightweight
+        candidate_points = game.get_relative_points() if not lightweight else {}
+        deadly_moves = (
+            {key: game.is_collision(point) for key, point in candidate_points.items()}
+            if candidate_points
+            else {}
+        )
         q_values = action_info["q_values"]
-        state_items = agent.describe_state(state)
-        top_state_items = sorted(state_items, key=lambda item: abs(item["value"]), reverse=True)[:6]
-        network_view = agent.inspect_network(state, action_info["action_index"])
         train_info = context["train_info"]
+        fast_mode_requested = bool(context.get("fast_mode_requested", False))
+        fast_mode_effective = bool(context.get("fast_mode_effective", False))
+        fast_tail_episodes = int(context.get("fast_tail_episodes", 5))
+        episodes_remaining = int(context.get("episodes_remaining", 0))
 
-        feature_lines = [
-            f"{item['label']}: {item['value']:+.2f}"
-            for item in top_state_items
-        ]
-        feature_lines.extend(
-            [
-                f"Food view: {agent.explain_food_view(state)}",
+        if lightweight:
+            network_view = {
+                "message": (
+                    "Network inspection is disabled during stripped fast episodes. "
+                    f"It returns for the final {fast_tail_episodes} animated episode(s)."
+                )
+            }
+            feature_lines = [
+                "Fast mode is stripping step-by-step visualization for this episode.",
+                f"Final animated tail: last {fast_tail_episodes} episode(s).",
+                f"Episodes remaining in this session: {episodes_remaining}",
                 f"Warmup remaining: {train_info.get('warmup_remaining', 0)}",
                 f"Replay buffer fill: {train_info.get('buffer_size', 0)}",
+                f"Current device: {agent.device_label}",
             ]
-        )
-        help_lines = [
-            "[accent]Overview: board on the left, current decision on the right, history below.",
-            "[accent]Network: live forward pass across the configurable hidden layers.",
-            "[accent]Algorithm: Bellman target, replay memory, and target-net update flow.",
-            f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
-        ]
+            help_lines = [
+                "[accent]Board redraws, network heatmaps, and per-step dashboard rebuilds are skipped.",
+                "[accent]Episode metrics, score history, checkpoints, and logs still update.",
+            ]
+        else:
+            state_items = agent.describe_state(state)
+            top_state_items = sorted(
+                state_items,
+                key=lambda item: abs(item["value"]),
+                reverse=True,
+            )[:6]
+            network_view = (
+                agent.inspect_network(state, action_info["action_index"])
+                if include_network
+                else {}
+            )
+            feature_lines = [
+                f"{item['label']}: {item['value']:+.2f}"
+                for item in top_state_items
+            ]
+            feature_lines.extend(
+                [
+                    f"Food view: {agent.explain_food_view(state)}",
+                    f"Warmup remaining: {train_info.get('warmup_remaining', 0)}",
+                    f"Replay buffer fill: {train_info.get('buffer_size', 0)}",
+                ]
+            )
+            help_lines = [
+                "[accent]Overview: board on the left, current decision on the right, history below.",
+                "[accent]Network: live forward pass across the configurable hidden layers.",
+                "[accent]Algorithm: Bellman target, replay memory, and target-net update flow.",
+                f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
+            ]
+
+        if fast_mode_requested and fast_mode_requested != fast_mode_effective:
+            help_lines.append("[accent]Fast mode change is queued and will apply next episode.")
+        elif fast_mode_effective and not lightweight:
+            help_lines.append(
+                f"[accent]Fast mode is active. The final {fast_tail_episodes} episode(s) are animated."
+            )
 
         best_q = max(q_values)
         best_action_index = q_values.index(best_q)
@@ -623,6 +687,10 @@ class TrainingDashboard:
             f"Food cue: {agent.explain_food_view(state)}",
             f"Architecture: {agent.architecture_label}",
         ]
+        if lightweight:
+            decision_summary.append("Visualization: stripped fast pass")
+        elif fast_mode_effective:
+            decision_summary.append(f"Visualization: animated tail ({fast_tail_episodes} episode window)")
 
         metrics = [
             ("Run", f"{current_game_number}/{max(episode_goal, current_game_number)}"),
@@ -666,27 +734,31 @@ class TrainingDashboard:
             {
                 "label": "Tabular score",
                 "values": self.baseline_scores,
-                "visible": self.show_scores_toggle.value and bool(self.baseline_scores),
+                "visible": show_baseline and self.show_scores_toggle.value and bool(self.baseline_scores),
                 "color": (110, 140, 180),
                 "thickness": 2,
             },
             {
                 "label": "Tabular avg",
                 "values": self.baseline_average_history,
-                "visible": self.show_avg_toggle.value and bool(self.baseline_average_history),
+                "visible": show_baseline and self.show_avg_toggle.value and bool(self.baseline_average_history),
                 "color": (130, 190, 150),
                 "thickness": 2,
             },
             {
                 "label": "Tabular best",
                 "values": self.baseline_best_history,
-                "visible": self.show_best_toggle.value and bool(self.baseline_best_history),
+                "visible": show_baseline and self.show_best_toggle.value and bool(self.baseline_best_history),
                 "color": (200, 165, 100),
                 "thickness": 2,
             },
         ]
 
-        comparison_lines = self._build_comparison_lines()
+        comparison_lines = self._build_comparison_lines(
+            show_baseline=show_baseline,
+            fast_mode_effective=fast_mode_effective,
+            fast_tail_episodes=fast_tail_episodes,
+        )
         algorithm_sections = self._build_algorithm_sections(agent, action_info, context)
         control_panel = self._build_control_panel()
         control_sections = self._build_control_sections()
@@ -742,7 +814,19 @@ class TrainingDashboard:
             "control_sections": control_sections,
         }
 
-    def _build_comparison_lines(self):
+    def _build_comparison_lines(self, show_baseline, fast_mode_effective, fast_tail_episodes):
+        if not show_baseline:
+            if fast_mode_effective:
+                return [
+                    f"Fast mode is hiding the tabular baseline until the run leaves stripped mode.",
+                    f"Only the final {fast_tail_episodes} episode(s) are animated in the current session.",
+                    "Deep RL score history still updates after every completed episode.",
+                ]
+            return [
+                "Tabular comparison is currently hidden for this session.",
+                "Deep RL score history still updates after every completed episode.",
+            ]
+
         lines = [
             "Bright lines are the Deep RL run using the neural network.",
             "Muted lines are the tabular baseline using a lookup table.",
@@ -829,7 +913,7 @@ class TrainingDashboard:
             {"title": "Pace", "x": base_x, "y": self.speed_slider.track_rect.y - 36},
             {"title": "Rewards", "x": base_x, "y": self.food_reward_slider.track_rect.y - 36},
             {"title": "Session", "x": base_x, "y": self.show_arrows_toggle.rect.y - 18},
-            {"title": "Compute", "x": base_x, "y": self.cpu_device_button.rect.y - 18},
+            {"title": "Compute", "x": base_x, "y": self.fast_mode_toggle.rect.y - 18},
             {"title": "History", "x": base_x, "y": self.show_scores_toggle.rect.y - 18},
         ]
 

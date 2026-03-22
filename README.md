@@ -60,6 +60,7 @@ Useful options:
 py -3 train.py --episodes 100 --resume --device auto
 py -3 train.py --episodes 100 --no-render --device auto
 py -3 train.py --episodes 100 --resume --hidden-layers 128,128 --device cuda
+py -3 train.py --episodes 300 --fast-mode --fast-tail-episodes 5 --device auto
 ```
 
 Notes:
@@ -69,6 +70,10 @@ Notes:
 - older checkpoints without architecture metadata are treated as `128,128`
 - `--device auto` uses CUDA when available, otherwise CPU
 - `--device cuda` fails clearly if CUDA is unavailable on your machine
+- `--fast-mode` strips most per-step visualization work and animates only the final tail episodes
+- `--fast-tail-episodes` controls how many ending episodes stay fully animated in fast mode
+- fast mode skips tabular-baseline generation and hides baseline series while it is active
+- when a rendered fast-mode session finishes, the UI can replay the last 3 recorded fast episodes from on-screen buttons
 
 ## Visualizer
 
@@ -91,6 +96,7 @@ py -3 visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metric
 - `E` open the algorithm page
 - `C` select CPU training or viewing
 - `U` select GPU or CUDA training or viewing when CUDA is available
+- `X` toggle Fast Mode for training sessions
 - `A` toggle action arrows
 - `D` toggle danger overlays
 - `G` toggle the graph
@@ -105,8 +111,10 @@ py -3 visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metric
 
 Rendered training sessions now wait for an on-screen `Start` button, so you can choose the runtime device first.
 If `No Render` is enabled, training auto-starts and keeps updating the graph in the open window after each episode.
+`Fast Mode [X]` is available in the training UI and applies from the next episode boundary, not in the middle of the current run.
+After a rendered fast-mode session completes, the finish overlay can replay the last 3 recorded runs without keeping older episode replays in memory.
 
 ## Current implementation note
 
-The configurable-architecture Deep RL version is in place, with both CLI and in-dashboard CPU/CUDA device selection.
+The configurable-architecture Deep RL version is in place, with CPU/CUDA device selection and an optional fast training mode.
 Open `SESSION_HANDOFF.md` for a clear done / next / blocked record before continuing in another Codex session.

@@ -38,6 +38,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - headless mode support
 - local tabular baseline generation for comparison mode
 - CPU/CUDA device selection through `auto`, `cpu`, and `cuda`
+- optional fast training mode with a stripped early-run path and animated ending tail
 
 ## Architecture work implemented
 
@@ -99,6 +100,26 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - a color legend
   - stronger layer accenting
   - clearer top-node highlighting
+- added fast-mode controls and runtime behavior:
+  - CLI support for `--fast-mode` and `--fast-tail-episodes`
+  - a new `Fast Mode [X]` toggle in the training dashboard
+  - fast mode changes apply at the next episode boundary
+  - fast mode skips tabular-baseline generation while active
+  - fast mode strips most per-step dashboard work for early episodes
+  - the final tail episodes stay fully animated
+  - after a rendered fast-mode session completes, the overlay can replay the last 3 recorded fast runs
+  - replay history is kept in memory only and capped to the latest 3 episodes
+- made network inspection lazy:
+  - `agent.inspect_network(...)` is no longer built on every dashboard refresh
+  - the heavy network payload is now built only when the `Network` tab is active
+  - stripped fast episodes show an explanatory placeholder instead of live heatmaps
+- confirmed the antigravity fixes are present in the current code:
+  - dashboard mouse input now uses scaled pygame events in the trainer/viewer loops
+  - the `Episode goal` field and neighboring controls have extra vertical spacing to avoid overlap
+- cleaned up `app_core.py` so training and viewer entrypoints are consistent again:
+  - CPU/GPU device changes are wired through the runtime
+  - rendered training uses the `Start` gate again
+  - viewer and trainer now both pass device state into the dashboard cleanly
 
 ## Validation completed
 
@@ -113,6 +134,9 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - rendered training waits for `Start` before stepping the environment
   - `No Render` still auto-starts
   - dashboard device selection can switch the agent between CPU and CUDA at runtime
+  - fast mode can skip heavy per-step rendering work while keeping episode history updates
+  - fast mode keeps the final tail episodes fully animated when rendering is on
+  - the fast-mode finish overlay can replay the latest 3 recorded fast runs
 
 ## Blocked / not yet verified
 
@@ -124,8 +148,12 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - `train.py --episodes 2 --hidden-layers 256,128,64 --no-render`
   - `train.py --episodes 2 --device auto`
   - `train.py --episodes 2 --device cuda`
+  - `train.py --episodes 8 --fast-mode --fast-tail-episodes 5`
+  - `train.py --episodes 8 --fast-mode --no-render`
   - `visualizer.py --checkpoint ... --metrics-log ...`
   - the new on-screen `Start`, `CPU`, and `GPU` buttons in a real pygame session
+  - the new `Fast Mode [X]` toggle and final-tail animation behavior in a real pygame session
+  - the new fast-mode replay buttons after training completes
   - actual pygame layout behavior with different window updates and longer runs
 
 ## Next recommended steps
@@ -144,6 +172,8 @@ py -3 train.py --episodes 2 --comparison-mode --no-render
 py -3 train.py --episodes 2 --hidden-layers 64 --no-render
 py -3 train.py --episodes 2 --hidden-layers 256,128,64 --no-render
 py -3 train.py --episodes 2 --device auto
+py -3 train.py --episodes 8 --fast-mode --fast-tail-episodes 5
+py -3 train.py --episodes 8 --fast-mode --no-render
 ```
 
 3. Run a resume mismatch check manually:
@@ -169,11 +199,17 @@ Check for:
 - correct `Tab` / `N` / `E` view switching
 - correct `Start [Enter]` behavior in rendered training
 - correct `CPU [C]` / `GPU [U]` button states and runtime switching
+- correct `Fast Mode [X]` toggle state and next-episode application behavior
+- no tabular baseline lines visible while fast mode is active
+- only the final tail episodes animate in fast mode
+- the finish overlay shows replay buttons for the latest 3 fast-mode runs
+- replay buttons actually play back the recorded last-3 runs on screen
 - clear teaching flow in the `Algorithm` page
 
 ## Good continuation targets for another Codex session
 
 - do the real runtime smoke tests and fix any behavioral bugs found there
+- profile the remaining training cost after fast mode to see whether state encoding or RL batch updates are now the next bottleneck
 - polish the `Network` page further if a very deep architecture makes columns too narrow
 - add screenshots or a visual verification checklist to `README.md`
 - optionally add richer checkpoint browsing or per-layer statistics if you want a more research-lab feel
