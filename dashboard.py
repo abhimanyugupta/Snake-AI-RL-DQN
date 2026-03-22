@@ -186,6 +186,7 @@ class TrainingDashboard:
         cuda_available=False,
         require_manual_start=False,
         initial_fast_mode=False,
+        initial_trainer_mode="single",
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -204,6 +205,9 @@ class TrainingDashboard:
         self.view_mode = "overview"
         self.view_order = ["overview", "network", "algorithm"]
         self.cuda_available = bool(cuda_available)
+        self.selected_trainer_mode = (
+            "parallel" if str(initial_trainer_mode).lower() == "parallel" else "single"
+        )
         self.selected_device_preference = (
             "cuda"
             if str(initial_device_preference).lower() == "cuda" and self.cuda_available
@@ -288,6 +292,10 @@ class TrainingDashboard:
         self.gpu_device_button = ButtonControl("GPU [U]", col_x + toggle_w + 10, y, toggle_w, 26, "device_cuda")
         y += 32
 
+        self.single_trainer_button = ButtonControl("Single [J]", col_x, y, toggle_w, 26, "trainer_single")
+        self.parallel_trainer_button = ButtonControl("Parallel [P]", col_x + toggle_w + 10, y, toggle_w, 26, "trainer_parallel")
+        y += 32
+
         self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 26)
         self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 26)
         y += 32
@@ -317,6 +325,8 @@ class TrainingDashboard:
             self.start_button,
             self.cpu_device_button,
             self.gpu_device_button,
+            self.single_trainer_button,
+            self.parallel_trainer_button,
         ]
 
         self.initial_episode_goal = initial_episode_goal
@@ -561,6 +571,10 @@ class TrainingDashboard:
             self._handle_control_button("device_cpu")
         elif key == pygame.K_u:
             self._handle_control_button("device_cuda")
+        elif key == pygame.K_j:
+            self._handle_control_button("trainer_single")
+        elif key == pygame.K_p:
+            self._handle_control_button("trainer_parallel")
         elif key == pygame.K_s:
             self.show_scores_toggle.toggle()
         elif key == pygame.K_m:
@@ -593,6 +607,10 @@ class TrainingDashboard:
             self.selected_device_preference = "cpu"
         elif mode_value == "device_cuda" and self.cuda_available:
             self.selected_device_preference = "cuda"
+        elif mode_value == "trainer_single" and not self.started:
+            self.selected_trainer_mode = "single"
+        elif mode_value == "trainer_parallel" and not self.started:
+            self.selected_trainer_mode = "parallel"
 
     def build_dashboard_data(
         self,
@@ -608,14 +626,23 @@ class TrainingDashboard:
         show_baseline=None,
     ):
         show_baseline = self.baseline_visible if show_baseline is None else bool(show_baseline)
-        include_network = self.view_mode == "network" and not lightweight
-        candidate_points = game.get_relative_points() if not lightweight else {}
+        trainer_mode = str(context.get("trainer_mode", "single")).strip().lower()
+        parallel_envs = int(max(1, context.get("parallel_envs", 1)))
+        parallel_phase = str(context.get("parallel_phase", "single")).strip().lower()
+        eval_tail_episodes = int(max(1, context.get("eval_tail_episodes", 3)))
+        parallel_bulk_mode = trainer_mode == "parallel" and parallel_phase == "bulk"
+        include_network = self.view_mode == "network" and not lightweight and not parallel_bulk_mode
+        candidate_points = (
+            game.get_relative_points() if not lightweight and not parallel_bulk_mode else {}
+        )
         deadly_moves = (
             {key: game.is_collision(point) for key, point in candidate_points.items()}
             if candidate_points
             else {}
         )
-        q_values = action_info["q_values"]
+        q_values = list(action_info.get("q_values", [0.0, 0.0, 0.0]))
+        if len(q_values) < len(agent.ACTION_LABELS):
+            q_values.extend([0.0] * (len(agent.ACTION_LABELS) - len(q_values)))
         train_info = context["train_info"]
         fast_mode_requested = bool(context.get("fast_mode_requested", False))
         fast_mode_effective = bool(context.get("fast_mode_effective", False))
@@ -643,6 +670,30 @@ class TrainingDashboard:
             help_lines = [
                 "[accent]Board redraws, network heatmaps, and per-step dashboard rebuilds are skipped.",
                 "[accent]Episode metrics, score history, checkpoints, and logs still update.",
+            ]
+        elif parallel_bulk_mode:
+            network_view = {
+                "message": (
+                    "Parallel bulk training is running headless worker environments. "
+                    "The live network inspection returns during the rendered evaluation tail."
+                )
+            }
+            feature_lines = [
+                "Parallel mode is stepping multiple headless Snake environments in batches.",
+                f"Parallel env count: {parallel_envs}",
+                f"Rendered evaluation tail: last {eval_tail_episodes} run(s)",
+                f"Warmup remaining: {train_info.get('warmup_remaining', 0)}",
+                f"Replay buffer fill: {train_info.get('buffer_size', 0)}",
+                f"Batch size: {train_info.get('batch_size', agent.batch_size)}",
+                f"Episode steps: {train_info.get('episode_steps', 0)}",
+                f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
+                f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
+            ]
+            help_lines = [
+                "[accent]The board shows a representative headless worker snapshot, not every environment.",
+                "[accent]Bulk training hides per-step heatmaps to keep throughput high.",
+                "[accent]Network and Algorithm pages switch back to live teaching detail during the evaluation tail.",
+                f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
             ]
         else:
             state_items = agent.describe_state(state)
@@ -686,34 +737,64 @@ class TrainingDashboard:
 
         best_q = max(q_values)
         best_action_index = q_values.index(best_q)
-        decision_summary = [
-            f"Chosen move: {action_info['action_label']}",
-            f"Selection mode: {action_info['decision_type']}",
-            f"Greedy favorite: {agent.ACTION_LABELS[best_action_index]} ({best_q:+.3f})",
-            f"Food cue: {agent.explain_food_view(state)}",
-            f"Architecture: {agent.architecture_label}",
-        ]
+        if parallel_bulk_mode:
+            decision_summary = [
+                f"Representative move: {action_info['action_label']}",
+                f"Selection mode: {action_info['decision_type']}",
+                f"Greedy favorite: {agent.ACTION_LABELS[best_action_index]} ({best_q:+.3f})",
+                f"Parallel envs: {parallel_envs}",
+                f"Batch size: {train_info.get('batch_size', agent.batch_size)}",
+                f"Architecture: {agent.architecture_label}",
+            ]
+        else:
+            decision_summary = [
+                f"Chosen move: {action_info['action_label']}",
+                f"Selection mode: {action_info['decision_type']}",
+                f"Greedy favorite: {agent.ACTION_LABELS[best_action_index]} ({best_q:+.3f})",
+                f"Food cue: {agent.explain_food_view(state)}",
+                f"Architecture: {agent.architecture_label}",
+            ]
         if lightweight:
             decision_summary.append("Visualization: stripped fast pass")
+        elif parallel_bulk_mode:
+            decision_summary.append("Visualization: headless parallel bulk training")
         elif fast_mode_effective:
             decision_summary.append(f"Visualization: animated tail ({fast_tail_episodes} episode window)")
 
-        metrics = [
-            ("Run", f"{current_game_number}/{max(episode_goal, current_game_number)}"),
-            ("Mode", context.get("mode_label", "Training")),
-            ("Score", game.score),
-            ("Best score", best_score),
-            ("Episode reward", f"{context.get('episode_reward', 0.0):+.2f}"),
-            ("Epsilon", f"{agent.epsilon:.3f}"),
-            ("Loss", self._format_metric(train_info.get("loss"))),
-            ("TD error", self._format_metric(train_info.get("td_error"))),
-            ("Buffer fill", train_info.get("buffer_size", 0)),
-            ("Warmup left", train_info.get("warmup_remaining", 0)),
-            ("Target sync in", train_info.get("target_sync_remaining", "-")),
-            ("Device", agent.device_label),
-            ("Architecture", agent.architecture_label),
-            ("Hidden layers", ",".join(str(size) for size in agent.hidden_layers)),
-        ]
+        if parallel_bulk_mode:
+            metrics = [
+                ("Run", f"{current_game_number}/{max(episode_goal, current_game_number)}"),
+                ("Mode", context.get("mode_label", "Parallel bulk")),
+                ("Score", game.score),
+                ("Best score", best_score),
+                ("Episode reward", f"{context.get('episode_reward', 0.0):+.2f}"),
+                ("Epsilon", f"{agent.epsilon:.3f}"),
+                ("Env steps/sec", self._format_rate(train_info.get("env_steps_per_sec"))),
+                ("Updates/sec", self._format_rate(train_info.get("updates_per_sec"))),
+                ("Buffer fill", train_info.get("buffer_size", 0)),
+                ("Batch size", train_info.get("batch_size", agent.batch_size)),
+                ("Parallel envs", parallel_envs),
+                ("Episode steps", train_info.get("episode_steps", 0)),
+                ("Device", agent.device_label),
+                ("Architecture", agent.architecture_label),
+            ]
+        else:
+            metrics = [
+                ("Run", f"{current_game_number}/{max(episode_goal, current_game_number)}"),
+                ("Mode", context.get("mode_label", "Training")),
+                ("Score", game.score),
+                ("Best score", best_score),
+                ("Episode reward", f"{context.get('episode_reward', 0.0):+.2f}"),
+                ("Epsilon", f"{agent.epsilon:.3f}"),
+                ("Loss", self._format_metric(train_info.get("loss"))),
+                ("TD error", self._format_metric(train_info.get("td_error"))),
+                ("Buffer fill", train_info.get("buffer_size", 0)),
+                ("Warmup left", train_info.get("warmup_remaining", 0)),
+                ("Target sync in", train_info.get("target_sync_remaining", "-")),
+                ("Device", agent.device_label),
+                ("Architecture", agent.architecture_label),
+                ("Hidden layers", ",".join(str(size) for size in agent.hidden_layers)),
+            ]
 
         graph_series = [
             {
@@ -764,6 +845,9 @@ class TrainingDashboard:
             show_baseline=show_baseline,
             fast_mode_effective=fast_mode_effective,
             fast_tail_episodes=fast_tail_episodes,
+            trainer_mode=trainer_mode,
+            parallel_phase=parallel_phase,
+            eval_tail_episodes=eval_tail_episodes,
         )
         algorithm_sections = self._build_algorithm_sections(agent, action_info, context)
         control_panel = self._build_control_panel()
@@ -820,7 +904,29 @@ class TrainingDashboard:
             "control_sections": control_sections,
         }
 
-    def _build_comparison_lines(self, show_baseline, fast_mode_effective, fast_tail_episodes):
+    def _build_comparison_lines(
+        self,
+        show_baseline,
+        fast_mode_effective,
+        fast_tail_episodes,
+        *,
+        trainer_mode="single",
+        parallel_phase="single",
+        eval_tail_episodes=3,
+    ):
+        if trainer_mode == "parallel":
+            if parallel_phase == "eval":
+                return [
+                    "Parallel bulk training has finished and the short evaluation tail is being rendered.",
+                    f"The final {eval_tail_episodes} evaluation run(s) are what become replayable after training.",
+                    "The graph still updates on completed episodes instead of every worker step.",
+                ]
+            return [
+                "Parallel mode is batching multiple headless environments for higher throughput.",
+                "The graph updates on completed episodes, while the board shows only a representative worker snapshot.",
+                f"The final {eval_tail_episodes} evaluation run(s) will be rendered and replayable.",
+            ]
+
         if not show_baseline:
             if fast_mode_effective:
                 return [
@@ -859,6 +965,49 @@ class TrainingDashboard:
     def _build_algorithm_sections(self, agent, action_info, context):
         train_info = context["train_info"]
         transition = context.get("transition", {})
+        trainer_mode = str(context.get("trainer_mode", "single")).strip().lower()
+        parallel_phase = str(context.get("parallel_phase", "single")).strip().lower()
+        parallel_envs = int(max(1, context.get("parallel_envs", 1)))
+        eval_tail_episodes = int(max(1, context.get("eval_tail_episodes", 3)))
+
+        if trainer_mode == "parallel" and parallel_phase == "bulk":
+            return [
+                {
+                    "title": "Parallel Bulk Training",
+                    "lines": [
+                        f"{parallel_envs} headless Snake environments are being stepped in parallel.",
+                        "One batched policy forward pass chooses actions for all active workers.",
+                        "Transitions are added to the replay buffer in batches before larger updates run.",
+                    ],
+                },
+                {
+                    "title": "Throughput Focus",
+                    "lines": [
+                        f"Batch size: {train_info.get('batch_size', agent.batch_size)}",
+                        f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
+                        f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
+                        "Network heatmaps and detailed algorithm cards are paused during bulk training.",
+                    ],
+                },
+                {
+                    "title": "Evaluation Tail",
+                    "lines": [
+                        f"The final {eval_tail_episodes} run(s) are rendered after bulk training completes.",
+                        "Those runs use the learned policy and become replayable in the Recent Replays card.",
+                        "This keeps the teaching UI without slowing down the main throughput path.",
+                    ],
+                },
+                {
+                    "title": "RL Update",
+                    "lines": [
+                        f"Replay buffer size: {train_info.get('buffer_size', 0)}",
+                        f"Loss: {self._format_metric(train_info.get('loss'))}",
+                        f"TD error: {self._format_metric(train_info.get('td_error'))}",
+                        f"Epsilon: {agent.epsilon:.3f}",
+                    ],
+                },
+            ]
+
         return [
             {
                 "title": "RL Loop",
@@ -944,6 +1093,18 @@ class TrainingDashboard:
                 active=self.selected_device_preference == "cuda",
                 disabled=not self.cuda_available,
                 style="device",
+            )
+        )
+        buttons.append(
+            self.single_trainer_button.draw_data(
+                active=self.selected_trainer_mode == "single",
+                disabled=self.started,
+            )
+        )
+        buttons.append(
+            self.parallel_trainer_button.draw_data(
+                active=self.selected_trainer_mode == "parallel",
+                disabled=self.started,
             )
         )
         return buttons

@@ -39,6 +39,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - local tabular baseline generation for comparison mode
 - CPU/CUDA device selection through `auto`, `cpu`, and `cuda`
 - optional fast training mode with a stripped early-run path and animated ending tail
+- optional parallel training mode with batched headless workers and a short rendered evaluation tail
 
 ## Architecture work implemented
 
@@ -122,6 +123,28 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - fast-mode diagnostics now avoid forcing detailed GPU-to-CPU scalar sync on every single training step
   - snake collision checks now use a body-occupancy set instead of repeated list scans
   - the free-space state features now raycast against walls plus the occupancy set
+- added a true headless `SnakeLogicEnv` so the speed-focused trainer can step non-rendered environments without going through the pygame wrapper
+- refactored the replay buffer to use contiguous NumPy storage and vectorized batched inserts
+- added parallel-mode controls and runtime behavior:
+  - CLI support for `--trainer-mode single|parallel`
+  - CLI support for `--parallel-envs`
+  - CLI support for `--eval-tail-episodes`
+  - pre-start UI buttons for `Single [J]` and `Parallel [P]`
+  - checkpoint metadata for trainer mode, parallel env count, and eval-tail size
+  - resume now restores saved trainer-mode metadata unless the CLI explicitly overrides it
+  - parallel bulk mode batches multiple headless Snake environments into shared policy updates
+  - parallel mode defaults to larger training schedules:
+    - CUDA batch size `1024`
+    - CPU batch size `512`
+    - `update_every_transitions = 32`
+    - `gradient_steps_per_update = 2`
+  - parallel bulk mode updates the dashboard on a summary cadence instead of every worker step
+  - the `Overview` page now switches to throughput-oriented messaging in parallel bulk mode
+  - the `Network` and `Algorithm` pages show placeholders during parallel bulk mode and return to teaching detail during the evaluation tail
+  - parallel mode does not precompute or display the tabular baseline during bulk training
+  - only the final rendered evaluation-tail runs are kept as replayable last-3 replays
+  - parallel-mode metrics are buffered and flushed every 8 completed episodes
+  - parallel mode checkpoints on interval and final exit, rather than every new best score
 - made network inspection lazy:
   - `agent.inspect_network(...)` is no longer built on every dashboard refresh
   - the heavy network payload is now built only when the `Network` tab is active
@@ -153,6 +176,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - the sidebar replay card is populated from the same latest-3 in-memory replay list
   - stripped fast episodes no longer request pacing through `play_step(...)`
   - the DQN fast path can choose actions without building full Q-value payloads every step
+  - the new parallel-mode CLI, dashboard state, and training code compile cleanly with the rest of the project
 
 ## Blocked / not yet verified
 
@@ -166,11 +190,18 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - `train.py --episodes 2 --device cuda`
   - `train.py --episodes 8 --fast-mode --fast-tail-episodes 5`
   - `train.py --episodes 8 --fast-mode --no-render`
+  - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --no-render`
+  - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --device auto`
+  - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --eval-tail-episodes 3`
   - `visualizer.py --checkpoint ... --metrics-log ...`
   - the new on-screen `Start`, `CPU`, and `GPU` buttons in a real pygame session
+  - the new `Single [J]` / `Parallel [P]` trainer-mode buttons in a real pygame session
   - the new `Fast Mode [X]` toggle and final-tail animation behavior in a real pygame session
   - the new fast-mode replay buttons after training completes
   - the new `Recent Replays` sidebar card after training completes
+  - actual parallel-mode throughput gains and GPU-usage improvements on real hardware
+  - the rendered evaluation-tail replay flow after a parallel-mode session
+  - resume behavior when the saved checkpoint trainer mode is `parallel`
   - the replay-unavailable reason text in the sidebar under:
     - default mode
     - `No Render`
@@ -182,26 +213,35 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 1. Install dependencies locally:
 
 ```powershell
-py -3 -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+Interpreter note:
+
+- on this machine, `python` and `py -3.12` point to Python 3.12 with the project dependencies
+- `py -3` points to Python 3.14, which currently does not have `numpy` installed
+- use `python ...` or `py -3.12 ...` for this project unless the 3.14 environment is deliberately set up too
 
 2. Run short headless smoke tests:
 
 ```powershell
-py -3 train.py --episodes 2 --no-render
-py -3 train.py --episodes 2 --comparison-mode --no-render
-py -3 train.py --episodes 2 --hidden-layers 64 --no-render
-py -3 train.py --episodes 2 --hidden-layers 256,128,64 --no-render
-py -3 train.py --episodes 2 --device auto
-py -3 train.py --episodes 8 --fast-mode --fast-tail-episodes 5
-py -3 train.py --episodes 8 --fast-mode --no-render
+python train.py --episodes 2 --no-render
+python train.py --episodes 2 --comparison-mode --no-render
+python train.py --episodes 2 --hidden-layers 64 --no-render
+python train.py --episodes 2 --hidden-layers 256,128,64 --no-render
+python train.py --episodes 2 --device auto
+python train.py --episodes 8 --fast-mode --fast-tail-episodes 5
+python train.py --episodes 8 --fast-mode --no-render
+python train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --no-render
+python train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --device auto
+python train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --eval-tail-episodes 3
 ```
 
 3. Run a resume mismatch check manually:
 
 ```powershell
-py -3 train.py --episodes 2 --hidden-layers 128,128
-py -3 train.py --episodes 2 --resume --hidden-layers 64
+python train.py --episodes 2 --hidden-layers 128,128
+python train.py --episodes 2 --resume --hidden-layers 64
 ```
 
 The second command should fail clearly if the checkpoint uses a different architecture.
@@ -209,7 +249,7 @@ The second command should fail clearly if the checkpoint uses a different archit
 4. Open the live UI and visually inspect:
 
 ```powershell
-py -3 train.py --episodes 20 --comparison-mode --hidden-layers 128,128
+python train.py --episodes 20 --comparison-mode --hidden-layers 128,128
 ```
 
 Check for:
@@ -220,11 +260,14 @@ Check for:
 - correct `Tab` / `N` / `E` view switching
 - correct `Start [Enter]` behavior in rendered training
 - correct `CPU [C]` / `GPU [U]` button states and runtime switching
+- correct `Single [J]` / `Parallel [P]` pre-start selection behavior
 - correct `Fast Mode [X]` toggle state and next-episode application behavior
 - no tabular baseline lines visible while fast mode is active
 - only the final tail episodes animate in fast mode
 - the finish overlay shows replay buttons for the latest 3 fast-mode runs
 - replay buttons actually play back the recorded last-3 runs on screen
+- parallel-mode bulk training keeps the UI responsive while batching headless workers
+- the final evaluation tail renders after parallel bulk training and the latest 3 runs become replayable
 - clear teaching flow in the `Algorithm` page
 
 ## Good continuation targets for another Codex session

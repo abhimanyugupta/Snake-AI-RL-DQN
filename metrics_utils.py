@@ -12,6 +12,17 @@ def append_metric_entry(path: str | Path, entry: dict) -> None:
         handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
 
+def append_metric_entries(path: str | Path, entries: Iterable[dict]) -> None:
+    rows = list(entries)
+    if not rows:
+        return
+    log_path = Path(path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        for entry in rows:
+            handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
+
 def load_metric_entries(path: str | Path | None) -> List[dict]:
     if not path:
         return []

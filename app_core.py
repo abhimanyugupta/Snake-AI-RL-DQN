@@ -7,6 +7,13 @@ import time
 from collections import deque
 
 try:
+    import numpy as np
+except ImportError as exc:  # pragma: no cover - dependency guard
+    raise SystemExit(
+        "Missing dependency 'numpy'. Install requirements.txt before running the Deep RL project."
+    ) from exc
+
+try:
     import pygame
 except ImportError as exc:  # pragma: no cover - dependency guard
     raise SystemExit(
@@ -23,17 +30,20 @@ from dqn_agent import (
 )
 from metrics_utils import (
     append_metric_entry,
+    append_metric_entries,
     build_history,
     group_entries_by_algo,
     load_histories_from_log,
     load_metric_entries,
     rewrite_metric_entries,
 )
-from snake_game import SnakeGameAI
+from snake_game import SnakeGameAI, SnakeLogicEnv
 from tabular_agent import QLearningAgent
 
 
 DEFAULT_REWARD_CONFIG = {"food": 10.0, "death": -10.0, "step": 0.0}
+DEFAULT_TRAINER_MODE = "single"
+SUPPORTED_TRAINER_MODES = ("single", "parallel")
 
 
 def parse_hidden_layers_arg(raw_value):
@@ -63,6 +73,26 @@ def parse_positive_int_arg(raw_value):
     return value
 
 
+def parse_trainer_mode_arg(raw_value):
+    normalized = str(raw_value).strip().lower()
+    if normalized not in SUPPORTED_TRAINER_MODES:
+        raise argparse.ArgumentTypeError(
+            f"Trainer mode must be one of: {', '.join(SUPPORTED_TRAINER_MODES)}."
+        )
+    return normalized
+
+
+def resolve_trainer_mode_for_session(checkpoint_extra_state, resume, explicit_trainer_mode):
+    if explicit_trainer_mode:
+        return explicit_trainer_mode
+    if resume:
+        trainer_config = dict((checkpoint_extra_state or {}).get("trainer_config", {}))
+        restored_mode = str(trainer_config.get("mode", "")).strip().lower()
+        if restored_mode in SUPPORTED_TRAINER_MODES:
+            return restored_mode
+    return DEFAULT_TRAINER_MODE
+
+
 def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_layers):
     if resume and os.path.exists(checkpoint_path):
         checkpoint_config = load_checkpoint_network_config(checkpoint_path)
@@ -84,15 +114,29 @@ def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_l
     return list(DEFAULT_HIDDEN_LAYERS)
 
 
-def hold_training_window_open(game, dashboard, recent_episode_replays=None):
+def hold_training_window_open(
+    game,
+    dashboard,
+    recent_episode_replays=None,
+    *,
+    trainer_mode="single",
+    fast_mode_requested=False,
+    fast_mode_effective=False,
+    fast_tail_episodes=5,
+    eval_tail_episodes=3,
+    parallel_phase="bulk",
+):
     pygame.event.clear()
     recent_episode_replays = list(recent_episode_replays or [])
     recent_replays_panel = build_recent_replays_panel(
         dashboard,
         recent_episode_replays,
-        fast_mode_requested=dashboard.fast_mode_toggle.value,
-        fast_mode_effective=dashboard.fast_mode_toggle.value,
-        fast_tail_episodes=len(recent_episode_replays),
+        trainer_mode=trainer_mode,
+        fast_mode_requested=fast_mode_requested,
+        fast_mode_effective=fast_mode_effective,
+        fast_tail_episodes=max(1, int(fast_tail_episodes)),
+        eval_tail_episodes=max(1, int(eval_tail_episodes)),
+        parallel_phase=parallel_phase,
         training_completed=True,
     )
     game.set_dashboard_data(
@@ -219,7 +263,7 @@ def run_tabular_baseline(episodes, reward_config, metrics_log_path):
 
     baseline_entries = []
     agent = QLearningAgent()
-    game = SnakeGameAI(render=False, speed=0)
+    game = SnakeLogicEnv(speed=0)
     game.set_reward_config(reward_config)
 
     best_score = 0
@@ -283,7 +327,17 @@ def run_tabular_baseline(episodes, reward_config, metrics_log_path):
     return build_history(baseline_entries)
 
 
-def save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_transition):
+def save_checkpoint(
+    agent,
+    checkpoint_path,
+    dashboard,
+    metrics_log_path,
+    last_transition,
+    *,
+    trainer_mode="single",
+    parallel_envs=8,
+    eval_tail_episodes=3,
+):
     extra_state = {
         "reward_config": dashboard.reward_config,
         "deep_history": {
@@ -294,6 +348,11 @@ def save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_tr
         },
         "metrics_log_path": metrics_log_path,
         "last_transition": dict(last_transition or {}),
+        "trainer_config": {
+            "mode": str(trainer_mode or DEFAULT_TRAINER_MODE).strip().lower(),
+            "parallel_envs": int(max(1, parallel_envs)),
+            "eval_tail_episodes": int(max(1, eval_tail_episodes)),
+        },
     }
     agent.save(checkpoint_path, extra_state=extra_state)
 
@@ -353,9 +412,12 @@ def build_recent_replays_panel(
     dashboard,
     recent_episode_replays,
     *,
+    trainer_mode="single",
     fast_mode_requested,
     fast_mode_effective,
     fast_tail_episodes,
+    eval_tail_episodes=3,
+    parallel_phase="bulk",
     training_completed=False,
 ):
     replays = list(recent_episode_replays or [])
@@ -366,13 +428,52 @@ def build_recent_replays_panel(
         "footer": "",
     }
 
+    trainer_mode = str(trainer_mode or DEFAULT_TRAINER_MODE).strip().lower()
+    replay_label = "evaluation tail" if trainer_mode == "parallel" else "fast-mode tail"
+
     if training_completed and replays:
         panel["lines"] = [
-            f"Latest {len(replays)} captured fast-mode tail run(s).",
+            f"Latest {len(replays)} captured {replay_label} run(s).",
             "Click a run below or press 1/2/3 to replay it on the board.",
         ]
         panel["buttons"] = build_recent_replay_button_specs(replays)
         panel["footer"] = "Only the newest 3 runs are kept in memory."
+        return panel
+
+    if trainer_mode == "parallel":
+        if dashboard.headless_toggle.value:
+            panel["lines"] = [
+                "Parallel-mode replay capture is disabled while No Render is on.",
+                "Turn off No Render [H] to render the final evaluation tail.",
+            ]
+            return panel
+
+        if not dashboard.keep_open_toggle.value:
+            panel["lines"] = [
+                "Replay controls stay visible only when Keep open is enabled.",
+                "Turn on Keep open [K] before training finishes.",
+            ]
+            return panel
+
+        if training_completed:
+            panel["lines"] = [
+                "No evaluation-tail replays were captured in this session.",
+                "The rendered evaluation tail must finish to appear here.",
+            ]
+            return panel
+
+        if parallel_phase == "eval":
+            panel["lines"] = [
+                "Parallel training is complete.",
+                f"The final {max(1, int(eval_tail_episodes))} evaluation run(s) are being rendered and will appear here.",
+            ]
+        else:
+            panel["lines"] = [
+                "Parallel mode trains headlessly for speed, then renders a short evaluation tail.",
+                f"The final {max(1, int(eval_tail_episodes))} evaluation run(s) become replayable here after training finishes.",
+            ]
+        if replays:
+            panel["footer"] = f"Captured so far this session: {len(replays)}/3"
         return panel
 
     if not (fast_mode_requested or fast_mode_effective):
@@ -425,7 +526,7 @@ def build_training_finished_view(
     final_view["overlay_title"] = "Training finished"
     if recent_episode_replays:
         final_view["overlay_subtitle"] = (
-            "Replay one of the last 3 fast-mode runs, or press Enter, Q, or Esc to close."
+            "Replay one of the last 3 captured runs, or press Enter, Q, or Esc to close."
         )
         final_view["overlay_buttons"] = build_replay_overlay_buttons(game, recent_episode_replays)
     else:
@@ -443,7 +544,18 @@ def apply_replay_frame(game, frame):
     game.direction = frame.get("direction", game.direction)
     game.score = int(frame.get("score", game.score))
     game.frame_iteration = int(frame.get("frame_iteration", game.frame_iteration))
+    game.snake_body_set = set(game.snake[1:])
     game.set_dashboard_data(copy.deepcopy(frame.get("dashboard_data", {})))
+
+
+def copy_env_state_to_game(game, env):
+    game.snake = list(env.snake)
+    game.head = env.head
+    game.food = env.food
+    game.direction = env.direction
+    game.score = int(env.score)
+    game.frame_iteration = int(env.frame_iteration)
+    game.snake_body_set = set(env.snake_body_set)
 
 
 def play_episode_replay(game, episode_replay):
@@ -491,6 +603,10 @@ def build_training_context(
     train_info,
     transition,
     *,
+    trainer_mode="single",
+    parallel_envs=1,
+    parallel_phase="single",
+    eval_tail_episodes=3,
     fast_mode_requested=False,
     fast_mode_effective=False,
     fast_tail_episodes=5,
@@ -501,6 +617,10 @@ def build_training_context(
         "episode_reward": episode_reward,
         "train_info": train_info,
         "transition": transition,
+        "trainer_mode": str(trainer_mode or DEFAULT_TRAINER_MODE),
+        "parallel_envs": int(max(1, parallel_envs)),
+        "parallel_phase": str(parallel_phase or "single"),
+        "eval_tail_episodes": int(max(1, eval_tail_episodes)),
         "fast_mode_requested": bool(fast_mode_requested),
         "fast_mode_effective": bool(fast_mode_effective),
         "fast_tail_episodes": int(fast_tail_episodes),
@@ -587,6 +707,8 @@ def sync_agent_device_from_dashboard(agent, dashboard, session_label):
     if dashboard.selected_device_preference != agent.device_preference:
         if agent.set_device(dashboard.selected_device_preference):
             print(f"Switched {session_label} device to {agent.device_label} ({agent.device})")
+            return True
+    return False
 
 
 def ensure_baseline_history(
@@ -620,6 +742,657 @@ def ensure_baseline_history(
     return baseline_history
 
 
+def resolve_parallel_batch_size(device_type):
+    return 1024 if str(device_type) == "cuda" else 512
+
+
+def configure_agent_for_mode(agent, trainer_mode):
+    trainer_mode = str(trainer_mode).strip().lower()
+    if trainer_mode == "parallel":
+        agent.configure_training_schedule(
+            batch_size=resolve_parallel_batch_size(agent.device.type),
+            warmup_size=1_000,
+            target_sync_interval=250,
+            update_every_transitions=32,
+            gradient_steps_per_update=2,
+            trainer_mode="parallel",
+        )
+        return
+
+    agent.configure_training_schedule(
+        batch_size=256,
+        warmup_size=1_000,
+        target_sync_interval=250,
+        update_every_transitions=1,
+        gradient_steps_per_update=1,
+        trainer_mode="single",
+    )
+
+
+def flush_metric_buffer(metrics_log_path, pending_entries):
+    if pending_entries:
+        append_metric_entries(metrics_log_path, pending_entries)
+        pending_entries.clear()
+
+
+def maybe_build_parallel_frame(
+    *,
+    render,
+    dashboard,
+    last_frame_time,
+    force=False,
+):
+    if not render or dashboard.headless_toggle.value:
+        return False, last_frame_time
+
+    now = time.perf_counter()
+    if force or (now - last_frame_time) >= 0.18:
+        return True, now
+    return False, last_frame_time
+
+
+def resolve_positive_session_int(checkpoint_extra_state, resume, explicit_value, key, default_value):
+    if explicit_value is not None:
+        return max(1, int(explicit_value))
+    if resume:
+        trainer_config = dict((checkpoint_extra_state or {}).get("trainer_config", {}))
+        restored_value = trainer_config.get(key)
+        if restored_value is not None:
+            try:
+                return max(1, int(restored_value))
+            except (TypeError, ValueError):
+                pass
+    return max(1, int(default_value))
+
+
+def await_training_start(
+    *,
+    game,
+    dashboard,
+    agent,
+    comparison_mode,
+    best_score,
+    last_transition,
+    session_perf,
+    parallel_envs,
+    eval_tail_episodes,
+    fast_tail_episodes,
+):
+    if not game.render or dashboard.started:
+        return dashboard.selected_trainer_mode
+
+    preview_state = agent.encode_state(game)
+    while not game.quit_requested and not dashboard.started:
+        events = pygame.event.get()
+        scaled_events = game.scale_events(events)
+        dashboard.sync_graph_rect(game)
+        dashboard.handle_events(scaled_events)
+        game.handle_system_events(events)
+
+        if game.quit_requested:
+            break
+
+        selected_mode = dashboard.selected_trainer_mode
+        if sync_agent_device_from_dashboard(agent, dashboard, "training lobby"):
+            configure_agent_for_mode(agent, selected_mode)
+        else:
+            configure_agent_for_mode(agent, selected_mode)
+
+        if dashboard.headless_toggle.value:
+            dashboard.started = True
+            break
+
+        preview_fast_mode = bool(dashboard.fast_mode_toggle.value)
+        dashboard.set_baseline_visibility(
+            bool(comparison_mode and selected_mode == "single" and not preview_fast_mode)
+        )
+        preview_action = agent.get_action_details(preview_state, greedy=True)
+        preview_context = build_training_context(
+            "Ready to start",
+            0.0,
+            build_live_train_info(agent.last_train_info, session_perf, 0),
+            last_transition,
+            trainer_mode=selected_mode,
+            parallel_envs=parallel_envs,
+            parallel_phase="prestart" if selected_mode == "parallel" else "single",
+            eval_tail_episodes=eval_tail_episodes,
+            fast_mode_requested=preview_fast_mode,
+            fast_mode_effective=preview_fast_mode,
+            fast_tail_episodes=fast_tail_episodes,
+            episodes_remaining=dashboard.get_episode_goal(),
+        )
+        overlay_subtitle = (
+            "Choose device and trainer mode, then click Start [Enter] to begin."
+            if selected_mode == "parallel"
+            else "Click Start [Enter] to begin training."
+        )
+        draw_dashboard_frame(
+            game=game,
+            dashboard=dashboard,
+            agent=agent,
+            state=preview_state,
+            action_info=preview_action,
+            current_game_number=1,
+            episode_goal=dashboard.get_episode_goal(),
+            best_score=best_score,
+            context=preview_context,
+            lightweight=False,
+            show_baseline=dashboard.baseline_visible,
+            recent_replays_panel=build_recent_replays_panel(
+                dashboard,
+                [],
+                trainer_mode=selected_mode,
+                fast_mode_requested=preview_fast_mode,
+                fast_mode_effective=preview_fast_mode,
+                fast_tail_episodes=fast_tail_episodes,
+                eval_tail_episodes=eval_tail_episodes,
+                parallel_phase="prestart",
+                training_completed=False,
+            ),
+            overlay_title="Press Start",
+            overlay_subtitle=overlay_subtitle,
+        )
+        pygame.time.delay(30)
+
+    return dashboard.selected_trainer_mode
+
+
+def train_parallel_mode(
+    *,
+    agent,
+    game,
+    dashboard,
+    checkpoint_path,
+    metrics_log_path,
+    checkpoint_every,
+    session_start_games,
+    best_score,
+    last_transition,
+    recent_episode_replays,
+    session_perf,
+    parallel_envs,
+    eval_tail_episodes,
+):
+    dashboard.set_baseline_visibility(False)
+    pending_metric_entries = []
+    parallel_envs = max(1, int(parallel_envs))
+    eval_tail_episodes = max(1, int(eval_tail_episodes))
+    envs = [SnakeLogicEnv(speed=0) for _ in range(parallel_envs)]
+    for env in envs:
+        env.set_reward_config(dashboard.reward_config)
+    env_states = [agent.encode_state(env) for env in envs]
+    episode_rewards = [0.0 for _ in envs]
+    episode_steps = [0 for _ in envs]
+    last_frame_time = 0.0
+    bulk_iteration = 0
+
+    def completed_in_session():
+        return max(0, agent.n_games - session_start_games)
+
+    def should_render_eval_tail():
+        return bool(game.render and not dashboard.headless_toggle.value)
+
+    def current_recent_replays_panel(*, training_completed=False, parallel_phase="bulk"):
+        return build_recent_replays_panel(
+            dashboard,
+            recent_episode_replays,
+            trainer_mode="parallel",
+            fast_mode_requested=False,
+            fast_mode_effective=False,
+            fast_tail_episodes=1,
+            eval_tail_episodes=eval_tail_episodes,
+            parallel_phase=parallel_phase,
+            training_completed=training_completed,
+        )
+
+    def current_context(
+        mode_label,
+        *,
+        phase,
+        episode_reward,
+        episode_steps_value,
+        transition_override=None,
+    ):
+        train_info = build_live_train_info(
+            agent.last_train_info,
+            session_perf,
+            episode_steps_value,
+        )
+        total_goal = dashboard.get_episode_goal()
+        return build_training_context(
+            mode_label,
+            episode_reward,
+            train_info,
+            transition_override if transition_override is not None else last_transition,
+            trainer_mode="parallel",
+            parallel_envs=parallel_envs,
+            parallel_phase=phase,
+            eval_tail_episodes=eval_tail_episodes,
+            fast_mode_requested=False,
+            fast_mode_effective=False,
+            fast_tail_episodes=1,
+            episodes_remaining=max(0, total_goal - completed_in_session()),
+        )
+
+    def save_parallel_checkpoint():
+        save_checkpoint(
+            agent,
+            checkpoint_path,
+            dashboard,
+            metrics_log_path,
+            last_transition,
+            trainer_mode="parallel",
+            parallel_envs=parallel_envs,
+            eval_tail_episodes=eval_tail_episodes,
+        )
+
+    while not game.quit_requested:
+        current_goal = dashboard.get_episode_goal()
+        render_eval_tail = should_render_eval_tail()
+        eval_count = min(eval_tail_episodes, current_goal) if render_eval_tail else 0
+        bulk_target = max(0, current_goal - eval_count)
+        if completed_in_session() >= bulk_target:
+            break
+
+        bulk_iteration += 1
+        events = pygame.event.get() if game.render else []
+        scaled_events = game.scale_events(events) if game.render else []
+        if game.render:
+            dashboard.sync_graph_rect(game)
+            dashboard.handle_events(scaled_events)
+            game.handle_system_events(events)
+
+        if game.quit_requested:
+            break
+
+        if sync_agent_device_from_dashboard(agent, dashboard, "parallel training"):
+            configure_agent_for_mode(agent, "parallel")
+
+        reward_config = dashboard.reward_config
+        for env in envs:
+            env.set_reward_config(reward_config)
+
+        frame_due, last_frame_time = maybe_build_parallel_frame(
+            render=game.render,
+            dashboard=dashboard,
+            last_frame_time=last_frame_time,
+            force=False,
+        )
+
+        if dashboard.pause_toggle.value:
+            if game.render and not dashboard.headless_toggle.value:
+                representative_index = 0
+                representative_env = envs[representative_index]
+                copy_env_state_to_game(game, representative_env)
+                preview_state = env_states[representative_index]
+                preview_action = agent.get_action_details(preview_state, greedy=True)
+                game.set_dashboard_data(
+                    build_dashboard_frame(
+                        game=game,
+                        dashboard=dashboard,
+                        agent=agent,
+                        state=preview_state,
+                        action_info=preview_action,
+                        current_game_number=completed_in_session() + 1,
+                        episode_goal=dashboard.get_episode_goal(),
+                        best_score=best_score,
+                        context=current_context(
+                            "Parallel paused",
+                            phase="bulk",
+                            episode_reward=episode_rewards[representative_index],
+                            episode_steps_value=episode_steps[representative_index],
+                        ),
+                        lightweight=False,
+                        show_baseline=False,
+                        recent_replays_panel=current_recent_replays_panel(parallel_phase="bulk"),
+                    )
+                )
+                game.draw()
+                pygame.time.delay(30)
+            else:
+                pygame.time.delay(5)
+            continue
+
+        active_indices = list(range(len(envs)))
+        states_batch = None
+        if active_indices:
+            states_batch = np.stack([env_states[index] for index in active_indices])
+        if states_batch is None or len(states_batch) == 0:
+            break
+
+        action_indices = agent.get_action_indices_batch(states_batch, greedy=False)
+        rewards = []
+        dones = []
+        next_states = []
+        completed_records = []
+
+        for row, env_index in enumerate(active_indices):
+            env = envs[env_index]
+            reward, game_over, score = env.play_step(
+                agent.index_to_action(int(action_indices[row])),
+                events=[],
+                draw_frame=False,
+                apply_pacing=False,
+            )
+            episode_rewards[env_index] += reward
+            episode_steps[env_index] += 1
+            next_state = agent.encode_state(env)
+            env_states[env_index] = next_state
+            rewards.append(float(reward))
+            dones.append(float(game_over))
+            next_states.append(next_state)
+            if game_over:
+                completed_records.append(
+                    {
+                        "env_index": env_index,
+                        "score": int(score),
+                        "episode_reward": float(episode_rewards[env_index]),
+                        "steps": int(episode_steps[env_index]),
+                        "final_reward": float(reward),
+                    }
+                )
+
+        agent.remember_batch(
+            states_batch,
+            action_indices,
+            rewards,
+            next_states,
+            dones,
+        )
+        session_perf["env_steps"] += len(active_indices)
+        collect_diagnostics = bool(completed_records or frame_due or (bulk_iteration % 16 == 0))
+        train_info = agent.train_step(
+            collect_diagnostics=collect_diagnostics,
+            num_new_transitions=len(active_indices),
+        )
+        session_perf["updates"] += int(train_info.get("update_count", 0))
+
+        remaining_bulk_slots = max(0, bulk_target - completed_in_session())
+        for record in completed_records[:remaining_bulk_slots]:
+            current_run_number = completed_in_session() + 1
+            agent.n_games += 1
+            agent.decay_epsilon()
+            dashboard.record_deep_episode(record["score"], record["episode_reward"])
+            best_score = max(best_score, record["score"])
+            moving_avg = dashboard.deep_average_history[-1]
+            last_transition = {
+                "reward_text": f"{record['final_reward']:+.2f}",
+                "done": True,
+                "score": int(record["score"]),
+            }
+            pending_metric_entries.append(
+                build_metric_entry(
+                    algo="deep",
+                    episode=agent.n_games,
+                    score=record["score"],
+                    episode_reward=record["episode_reward"],
+                    moving_avg=moving_avg,
+                    epsilon=agent.epsilon,
+                    loss=agent.last_train_info.get("loss"),
+                    steps=record["steps"],
+                    buffer_size=len(agent.replay_buffer),
+                    best_score=best_score,
+                )
+            )
+            if len(pending_metric_entries) >= 8:
+                flush_metric_buffer(metrics_log_path, pending_metric_entries)
+            if agent.n_games % checkpoint_every == 0:
+                save_parallel_checkpoint()
+
+            perf_info = build_live_train_info(
+                agent.last_train_info,
+                session_perf,
+                record["steps"],
+            )
+            print(
+                f"Parallel run {current_run_number:>4}/{dashboard.get_episode_goal():<4} | "
+                f"Total games: {agent.n_games:>4} | "
+                f"Score: {record['score']:>2} | "
+                f"Best: {best_score:>2} | "
+                f"Epsilon: {agent.epsilon:.3f} | "
+                f"Episode steps: {record['steps']:>4} | "
+                f"Env/s: {perf_info.get('env_steps_per_sec', 0.0):6.1f} | "
+                f"Updates/s: {perf_info.get('updates_per_sec', 0.0):6.1f} | "
+                f"Buffer: {len(agent.replay_buffer)} | "
+                f"Loss: {agent.last_train_info.get('loss')} | "
+                f"Mode: parallel"
+            )
+
+            current_goal = dashboard.get_episode_goal()
+            render_eval_tail = should_render_eval_tail()
+            eval_count = min(eval_tail_episodes, current_goal) if render_eval_tail else 0
+            bulk_target = max(0, current_goal - eval_count)
+            if completed_in_session() < bulk_target:
+                env = envs[record["env_index"]]
+                env.reset()
+                env.set_reward_config(reward_config)
+                env_states[record["env_index"]] = agent.encode_state(env)
+                episode_rewards[record["env_index"]] = 0.0
+                episode_steps[record["env_index"]] = 0
+
+        if game.render and not dashboard.headless_toggle.value and (frame_due or completed_records):
+            representative_env = envs[0]
+            representative_state = env_states[0]
+            copy_env_state_to_game(game, representative_env)
+            preview_action = agent.get_action_details(representative_state, greedy=True)
+            game.set_dashboard_data(
+                build_dashboard_frame(
+                    game=game,
+                    dashboard=dashboard,
+                    agent=agent,
+                    state=representative_state,
+                    action_info=preview_action,
+                    current_game_number=completed_in_session() + 1,
+                    episode_goal=dashboard.get_episode_goal(),
+                    best_score=best_score,
+                    context=current_context(
+                        "Parallel bulk",
+                        phase="bulk",
+                        episode_reward=episode_rewards[0],
+                        episode_steps_value=episode_steps[0],
+                    ),
+                    lightweight=False,
+                    show_baseline=False,
+                    recent_replays_panel=current_recent_replays_panel(parallel_phase="bulk"),
+                )
+            )
+            game.draw()
+            if dashboard.current_delay_ms > 0 and not dashboard.turbo_toggle.value:
+                pygame.time.delay(min(30, dashboard.current_delay_ms))
+
+    flush_metric_buffer(metrics_log_path, pending_metric_entries)
+
+    if game.quit_requested:
+        return best_score, last_transition, False
+
+    remaining_goal = max(0, dashboard.get_episode_goal() - completed_in_session())
+    eval_runs = min(eval_tail_episodes, remaining_goal) if should_render_eval_tail() else 0
+    for _ in range(eval_runs):
+        if game.quit_requested:
+            break
+
+        current_game_number = completed_in_session() + 1
+        game.reset()
+        game.set_reward_config(dashboard.reward_config)
+        state = agent.encode_state(game)
+        episode_reward = 0.0
+        step_count = 0
+        episode_replay_frames = []
+        capture_replay = bool(game.render and not dashboard.headless_toggle.value)
+
+        while not game.quit_requested:
+            events = pygame.event.get() if game.render else []
+            scaled_events = game.scale_events(events) if game.render else []
+            if game.render:
+                dashboard.sync_graph_rect(game)
+                dashboard.handle_events(scaled_events)
+                game.handle_system_events(events)
+
+            if game.quit_requested:
+                break
+
+            if sync_agent_device_from_dashboard(agent, dashboard, "parallel evaluation"):
+                configure_agent_for_mode(agent, "parallel")
+            game.speed = 0 if dashboard.headless_toggle.value else dashboard.current_fps
+
+            if dashboard.pause_toggle.value:
+                preview_action = agent.get_action_details(state, greedy=True)
+                game.set_dashboard_data(
+                    build_dashboard_frame(
+                        game=game,
+                        dashboard=dashboard,
+                        agent=agent,
+                        state=state,
+                        action_info=preview_action,
+                        current_game_number=current_game_number,
+                        episode_goal=dashboard.get_episode_goal(),
+                        best_score=best_score,
+                        context=current_context(
+                            "Parallel eval",
+                            phase="eval",
+                            episode_reward=episode_reward,
+                            episode_steps_value=step_count,
+                        ),
+                        lightweight=False,
+                        show_baseline=False,
+                        recent_replays_panel=current_recent_replays_panel(parallel_phase="eval"),
+                    )
+                )
+                game.draw()
+                pygame.time.delay(30)
+                continue
+
+            action_info = agent.get_action_details(state, greedy=True)
+            step_count += 1
+            render_frame = bool(game.render and not dashboard.headless_toggle.value)
+            if render_frame:
+                frame_data = build_dashboard_frame(
+                    game=game,
+                    dashboard=dashboard,
+                    agent=agent,
+                    state=state,
+                    action_info=action_info,
+                    current_game_number=current_game_number,
+                    episode_goal=dashboard.get_episode_goal(),
+                    best_score=best_score,
+                    context=current_context(
+                        "Parallel eval",
+                        phase="eval",
+                        episode_reward=episode_reward,
+                        episode_steps_value=step_count,
+                    ),
+                    lightweight=False,
+                    show_baseline=False,
+                    recent_replays_panel=current_recent_replays_panel(parallel_phase="eval"),
+                )
+                game.set_dashboard_data(frame_data)
+                if capture_replay:
+                    episode_replay_frames.append(capture_replay_frame(game, frame_data))
+                if dashboard.should_draw_frame(step_count, force=True):
+                    game.draw()
+                    if dashboard.current_delay_ms > 0:
+                        pygame.time.delay(dashboard.current_delay_ms)
+
+            reward, game_over, score = game.play_step(
+                action_info["action"],
+                events=[],
+                draw_frame=False,
+                apply_pacing=not dashboard.headless_toggle.value,
+            )
+            episode_reward += reward
+            state = agent.encode_state(game)
+            last_transition = {
+                "reward_text": f"{reward:+.2f}",
+                "done": game_over,
+                "score": int(score),
+            }
+
+            if render_frame and game_over:
+                final_view = build_dashboard_frame(
+                    game=game,
+                    dashboard=dashboard,
+                    agent=agent,
+                    state=state,
+                    action_info=action_info,
+                    current_game_number=current_game_number,
+                    episode_goal=dashboard.get_episode_goal(),
+                    best_score=best_score,
+                    context=current_context(
+                        "Parallel eval",
+                        phase="eval",
+                        episode_reward=episode_reward,
+                        episode_steps_value=step_count,
+                        transition_override=last_transition,
+                    ),
+                    lightweight=False,
+                    show_baseline=False,
+                    recent_replays_panel=current_recent_replays_panel(parallel_phase="eval"),
+                )
+                final_view["overlay_title"] = "Evaluation run finished"
+                final_view["overlay_subtitle"] = f"Score: {score}"
+                game.set_dashboard_data(final_view)
+                if capture_replay:
+                    episode_replay_frames.append(capture_replay_frame(game, final_view))
+                game.draw()
+                pygame.time.delay(120 if dashboard.turbo_toggle.value else max(140, dashboard.current_delay_ms))
+
+            if game_over:
+                break
+
+        if game.quit_requested:
+            break
+
+        agent.n_games += 1
+        dashboard.record_deep_episode(score, episode_reward)
+        best_score = max(best_score, score)
+        if capture_replay and episode_replay_frames:
+            recent_episode_replays.append(
+                {
+                    "run_number": current_game_number,
+                    "score": int(score),
+                    "frames": episode_replay_frames,
+                }
+            )
+
+        moving_avg = dashboard.deep_average_history[-1]
+        pending_metric_entries.append(
+            build_metric_entry(
+                algo="deep",
+                episode=agent.n_games,
+                score=score,
+                episode_reward=episode_reward,
+                moving_avg=moving_avg,
+                epsilon=agent.epsilon,
+                loss=agent.last_train_info.get("loss"),
+                steps=step_count,
+                buffer_size=len(agent.replay_buffer),
+                best_score=best_score,
+            )
+        )
+        if len(pending_metric_entries) >= 8:
+            flush_metric_buffer(metrics_log_path, pending_metric_entries)
+        if agent.n_games % checkpoint_every == 0:
+            save_parallel_checkpoint()
+
+        perf_info = build_live_train_info(agent.last_train_info, session_perf, step_count)
+        print(
+            f"Parallel eval {current_game_number:>4}/{dashboard.get_episode_goal():<4} | "
+            f"Total games: {agent.n_games:>4} | "
+            f"Score: {score:>2} | "
+            f"Best: {best_score:>2} | "
+            f"Epsilon: {agent.epsilon:.3f} | "
+            f"Episode steps: {step_count:>4} | "
+            f"Env/s: {perf_info.get('env_steps_per_sec', 0.0):6.1f} | "
+            f"Updates/s: {perf_info.get('updates_per_sec', 0.0):6.1f} | "
+            f"Buffer: {len(agent.replay_buffer)} | "
+            f"Loss: {agent.last_train_info.get('loss')} | "
+            f"Mode: parallel-eval"
+        )
+
+    flush_metric_buffer(metrics_log_path, pending_metric_entries)
+    return best_score, last_transition, not game.quit_requested
+
+
 def train_session(
     episodes,
     render,
@@ -635,6 +1408,9 @@ def train_session(
     device_preference="auto",
     fast_mode=False,
     fast_tail_episodes=5,
+    trainer_mode=None,
+    parallel_envs=None,
+    eval_tail_episodes=None,
 ):
     histories = prepare_metrics_log(metrics_log_path, resume)
     deep_history = histories.get("deep", {})
@@ -646,6 +1422,25 @@ def train_session(
         checkpoint_state = agent.load(checkpoint_path)
         print(f"Loaded checkpoint from {checkpoint_path}")
 
+    resolved_trainer_mode = resolve_trainer_mode_for_session(
+        checkpoint_state,
+        resume,
+        trainer_mode,
+    )
+    resolved_parallel_envs = resolve_positive_session_int(
+        checkpoint_state,
+        resume,
+        parallel_envs,
+        "parallel_envs",
+        8,
+    )
+    resolved_eval_tail_episodes = resolve_positive_session_int(
+        checkpoint_state,
+        resume,
+        eval_tail_episodes,
+        "eval_tail_episodes",
+        3,
+    )
     initial_reward_config = checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG)
     deep_history = checkpoint_state.get("deep_history", deep_history)
 
@@ -661,10 +1456,13 @@ def train_session(
         cuda_available=cuda_is_available(),
         require_manual_start=render,
         initial_fast_mode=fast_mode,
+        initial_trainer_mode=resolved_trainer_mode,
     )
     dashboard.load_deep_history(deep_history)
-    dashboard.set_baseline_visibility(comparison_mode and not fast_mode)
-    if comparison_mode and not fast_mode and baseline_history:
+    dashboard.set_baseline_visibility(
+        bool(comparison_mode and not fast_mode and resolved_trainer_mode == "single")
+    )
+    if comparison_mode and not fast_mode and resolved_trainer_mode == "single" and baseline_history:
         dashboard.set_baseline_history(baseline_history)
 
     best_score = max(dashboard.deep_best_history) if dashboard.deep_best_history else 0
@@ -673,6 +1471,7 @@ def train_session(
     last_transition = checkpoint_state.get("last_transition", {"reward_text": "n/a"})
     fast_tail_episodes = max(1, int(fast_tail_episodes))
     recent_episode_replays = deque(maxlen=3)
+    active_trainer_mode = resolved_trainer_mode
     session_perf = {
         "start_time": time.perf_counter(),
         "env_steps": 0,
@@ -680,7 +1479,41 @@ def train_session(
     }
 
     try:
-        while True:
+        active_trainer_mode = await_training_start(
+            game=game,
+            dashboard=dashboard,
+            agent=agent,
+            comparison_mode=comparison_mode,
+            best_score=best_score,
+            last_transition=last_transition,
+            session_perf=session_perf,
+            parallel_envs=resolved_parallel_envs,
+            eval_tail_episodes=resolved_eval_tail_episodes,
+            fast_tail_episodes=fast_tail_episodes,
+        )
+        if game.quit_requested:
+            training_completed = False
+        else:
+            dashboard.selected_trainer_mode = active_trainer_mode
+            configure_agent_for_mode(agent, active_trainer_mode)
+
+        if active_trainer_mode == "parallel" and not game.quit_requested:
+            best_score, last_transition, training_completed = train_parallel_mode(
+                agent=agent,
+                game=game,
+                dashboard=dashboard,
+                checkpoint_path=checkpoint_path,
+                metrics_log_path=metrics_log_path,
+                checkpoint_every=checkpoint_every,
+                session_start_games=session_start_games,
+                best_score=best_score,
+                last_transition=last_transition,
+                recent_episode_replays=recent_episode_replays,
+                session_perf=session_perf,
+                parallel_envs=resolved_parallel_envs,
+                eval_tail_episodes=resolved_eval_tail_episodes,
+            )
+        while active_trainer_mode == "single" and not game.quit_requested:
             current_goal = dashboard.get_episode_goal()
             completed_in_session = agent.n_games - session_start_games
             if completed_in_session >= current_goal:
@@ -724,9 +1557,12 @@ def train_session(
                 return build_recent_replays_panel(
                     dashboard,
                     recent_episode_replays,
+                    trainer_mode=active_trainer_mode,
                     fast_mode_requested=dashboard.fast_mode_toggle.value,
                     fast_mode_effective=episode_fast_mode,
                     fast_tail_episodes=fast_tail_episodes,
+                    eval_tail_episodes=resolved_eval_tail_episodes,
+                    parallel_phase="single",
                     training_completed=training_completed,
                 )
 
@@ -747,6 +1583,10 @@ def train_session(
                     episode_reward,
                     train_info,
                     last_transition,
+                    trainer_mode=active_trainer_mode,
+                    parallel_envs=1,
+                    parallel_phase="single",
+                    eval_tail_episodes=resolved_eval_tail_episodes,
                     fast_mode_requested=dashboard.fast_mode_toggle.value,
                     fast_mode_effective=episode_fast_mode,
                     fast_tail_episodes=fast_tail_episodes,
@@ -991,7 +1831,16 @@ def train_session(
                 )
 
             if agent.n_games % checkpoint_every == 0 or score == best_score:
-                save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_transition)
+                save_checkpoint(
+                    agent,
+                    checkpoint_path,
+                    dashboard,
+                    metrics_log_path,
+                    last_transition,
+                    trainer_mode=active_trainer_mode,
+                    parallel_envs=resolved_parallel_envs,
+                    eval_tail_episodes=resolved_eval_tail_episodes,
+                )
 
             perf_info = build_live_train_info(agent.last_train_info, session_perf, step_count)
             print(
@@ -1008,11 +1857,33 @@ def train_session(
                 f"Mode: {'fast' if episode_fast_mode else 'default'}"
             )
 
-        training_completed = not game.quit_requested
+        if active_trainer_mode == "single":
+            training_completed = not game.quit_requested
     finally:
-        save_checkpoint(agent, checkpoint_path, dashboard, metrics_log_path, last_transition)
+        save_checkpoint(
+            agent,
+            checkpoint_path,
+            dashboard,
+            metrics_log_path,
+            last_transition,
+            trainer_mode=active_trainer_mode,
+            parallel_envs=resolved_parallel_envs,
+            eval_tail_episodes=resolved_eval_tail_episodes,
+        )
         if render and training_completed and dashboard.keep_open_toggle.value:
-            hold_training_window_open(game, dashboard, recent_episode_replays)
+            hold_training_window_open(
+                game,
+                dashboard,
+                recent_episode_replays,
+                trainer_mode=active_trainer_mode,
+                fast_mode_requested=bool(dashboard.fast_mode_toggle.value),
+                fast_mode_effective=bool(
+                    dashboard.fast_mode_toggle.value and active_trainer_mode == "single"
+                ),
+                fast_tail_episodes=fast_tail_episodes,
+                eval_tail_episodes=resolved_eval_tail_episodes,
+                parallel_phase="eval" if active_trainer_mode == "parallel" else "single",
+            )
         game.close()
 
     print(f"Training finished. Checkpoint saved to {checkpoint_path}")
@@ -1044,6 +1915,10 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
         initial_device_preference=agent.device.type,
         cuda_available=cuda_is_available(),
         require_manual_start=False,
+        initial_trainer_mode=checkpoint_state.get("trainer_config", {}).get(
+            "mode",
+            DEFAULT_TRAINER_MODE,
+        ),
     )
     dashboard.load_deep_history(deep_history)
     dashboard.set_baseline_visibility(bool(baseline_history))
@@ -1186,6 +2061,24 @@ def main_train():
         default=5,
         help="How many ending episodes to animate in fast mode.",
     )
+    parser.add_argument(
+        "--trainer-mode",
+        type=parse_trainer_mode_arg,
+        default=None,
+        help="Trainer mode. single keeps the teaching workflow, parallel batches headless workers for speed.",
+    )
+    parser.add_argument(
+        "--parallel-envs",
+        type=parse_positive_int_arg,
+        default=None,
+        help="How many headless Snake environments to step in parallel when --trainer-mode parallel is used.",
+    )
+    parser.add_argument(
+        "--eval-tail-episodes",
+        type=parse_positive_int_arg,
+        default=None,
+        help="How many rendered evaluation episodes to show at the end of a parallel-mode session.",
+    )
 
     args = parser.parse_args()
     render = not args.no_render
@@ -1213,6 +2106,9 @@ def main_train():
             device_preference=args.device,
             fast_mode=args.fast_mode,
             fast_tail_episodes=args.fast_tail_episodes,
+            trainer_mode=args.trainer_mode,
+            parallel_envs=args.parallel_envs,
+            eval_tail_episodes=args.eval_tail_episodes,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

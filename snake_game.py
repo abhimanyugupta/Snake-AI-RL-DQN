@@ -56,7 +56,233 @@ def get_available_display_area():
     return max(640, int(info.current_w)), max(720, int(info.current_h) - 40)
 
 
-class SnakeGameAI:
+class SnakeLogicEnv:
+    """Headless snake environment with no pygame dependency in its runtime path."""
+
+    def __init__(self, w=640, h=560, block_size=20, speed=0):
+        self.board_w = w
+        self.board_h = h
+        self.w = w
+        self.h = h
+        self.block_size = block_size
+        self.speed = speed
+        self.render = False
+        self.sidebar_width = 0
+        self.logical_w = self.board_w
+        self.logical_h = self.board_h
+        self.window_w = self.logical_w
+        self.window_h = self.logical_h
+        self.quit_requested = False
+        self.dashboard_data = {}
+        self.reward_config = {"food": 10.0, "death": -10.0, "step": 0.0}
+        self.clock = None
+        self.display = None
+        self.title_font = None
+        self.font = None
+        self.small_font = None
+        self.tiny_font = None
+        self._overlay_surface = None
+        self._glow_surface = None
+        self._real_display = None
+        self.reset()
+
+    def scale_events(self, events):
+        return events
+
+    def handle_system_events(self, events):
+        return None
+
+    def draw(self):
+        return None
+
+    def close(self):
+        return None
+
+    def reset(self):
+        """Reset the game so training can start a fresh episode."""
+        start_x = (self.board_w // 2 // self.block_size) * self.block_size
+        start_y = (self.board_h // 2 // self.block_size) * self.block_size
+
+        self.direction = Direction.RIGHT
+        self.head = Point(start_x, start_y)
+        self.snake = [
+            self.head,
+            Point(start_x - self.block_size, start_y),
+            Point(start_x - (2 * self.block_size), start_y),
+        ]
+        self.snake_body_set = set(self.snake[1:])
+
+        self.score = 0
+        self.food = None
+        self.frame_iteration = 0
+        self._place_food()
+
+    def set_dashboard_data(self, data):
+        self.dashboard_data = dict(data or {})
+
+    def set_reward_config(self, reward_config):
+        self.reward_config = {
+            "food": float(reward_config.get("food", 10.0)),
+            "death": float(reward_config.get("death", -10.0)),
+            "step": float(reward_config.get("step", 0.0)),
+        }
+
+    def get_relative_points(self):
+        return {
+            "straight": self._point_from_direction(self.head, self.direction),
+            "right": self._point_from_direction(self.head, self._turn_right(self.direction)),
+            "left": self._point_from_direction(self.head, self._turn_left(self.direction)),
+        }
+
+    def _place_food(self):
+        """Place food on a free grid cell."""
+        max_x = (self.board_w - self.block_size) // self.block_size
+        max_y = (self.board_h - self.block_size) // self.block_size
+
+        while True:
+            x = random.randint(0, max_x) * self.block_size
+            y = random.randint(0, max_y) * self.block_size
+            self.food = Point(x, y)
+            if self.food != self.head and self.food not in self.snake_body_set:
+                break
+
+    def play_step(self, action=None, events=None, draw_frame=True, apply_pacing=True):
+        """
+        Advance the game by one frame.
+
+        - If action is None, the game uses keyboard input when supported by the subclass.
+        - If action is [1, 0, 0], [0, 1, 0], or [0, 0, 1], the snake is
+          controlled by the agent.
+        """
+        if self.quit_requested:
+            return 0.0, True, self.score
+
+        self.frame_iteration += 1
+        events = events or []
+        self.handle_system_events(events)
+        if self.quit_requested:
+            return 0.0, True, self.score
+
+        if action is None:
+            self._handle_human_input(events)
+            self._move()
+        else:
+            self._move(action)
+
+        previous_head = self.snake[0]
+        self.snake.insert(0, self.head)
+        self.snake_body_set.add(previous_head)
+        reward = self.reward_config["step"]
+        game_over = False
+
+        if self.is_collision() or self.frame_iteration > 100 * len(self.snake):
+            reward = self.reward_config["death"]
+            game_over = True
+        elif self.head == self.food:
+            self.score += 1
+            reward = self.reward_config["food"]
+            self._place_food()
+        else:
+            tail = self.snake.pop()
+            self.snake_body_set.discard(tail)
+
+        if self.render and draw_frame:
+            self.draw()
+
+        if apply_pacing and self.speed > 0 and self.clock is not None:
+            self.clock.tick(self.speed)
+        return reward, game_over, self.score
+
+    def is_collision(self, point=None):
+        """Check whether a point hits a wall or the snake body."""
+        if point is None:
+            point = self.head
+
+        if self._is_wall_collision(point):
+            return True
+
+        if point in self.snake_body_set:
+            return True
+
+        return False
+
+    def raycast_free_steps(self, start, direction):
+        steps = 0
+        current = start
+        while True:
+            current = self._point_from_direction(current, direction)
+            if self._is_wall_collision(current) or current in self.snake_body_set:
+                return steps
+            steps += 1
+
+    def _is_wall_collision(self, point):
+        return (
+            point.x < 0
+            or point.x >= self.board_w
+            or point.y < 0
+            or point.y >= self.board_h
+        )
+
+    def _handle_human_input(self, events):
+        return None
+
+    def _move(self, action=None):
+        """
+        Move the snake.
+
+        The agent action is a one-hot list:
+        [1, 0, 0] = keep going straight
+        [0, 1, 0] = turn right
+        [0, 0, 1] = turn left
+        """
+        if action is not None:
+            action = list(action)
+            if len(action) != 3 or sum(action) != 1:
+                raise ValueError("Action must be a one-hot list like [1, 0, 0].")
+            self.direction = self._direction_for_action(action)
+
+        self.head = self._point_from_direction(self.head, self.direction)
+
+    def _direction_for_action(self, action):
+        clockwise = [Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP]
+        current_index = clockwise.index(self.direction)
+        action_index = list(action).index(1)
+
+        if action_index == 0:
+            return clockwise[current_index]
+        if action_index == 1:
+            return clockwise[(current_index + 1) % 4]
+        return clockwise[(current_index - 1) % 4]
+
+    def _point_from_direction(self, point, direction):
+        if direction == Direction.RIGHT:
+            return Point(point.x + self.block_size, point.y)
+        if direction == Direction.LEFT:
+            return Point(point.x - self.block_size, point.y)
+        if direction == Direction.UP:
+            return Point(point.x, point.y - self.block_size)
+        return Point(point.x, point.y + self.block_size)
+
+    def _turn_right(self, direction):
+        turns = {
+            Direction.RIGHT: Direction.DOWN,
+            Direction.DOWN: Direction.LEFT,
+            Direction.LEFT: Direction.UP,
+            Direction.UP: Direction.RIGHT,
+        }
+        return turns[direction]
+
+    def _turn_left(self, direction):
+        turns = {
+            Direction.RIGHT: Direction.UP,
+            Direction.UP: Direction.LEFT,
+            Direction.LEFT: Direction.DOWN,
+            Direction.DOWN: Direction.RIGHT,
+        }
+        return turns[direction]
+
+
+class SnakeGameAI(SnakeLogicEnv):
     """Playable snake game that also exposes helper methods for RL training."""
 
     def __init__(
@@ -69,30 +295,23 @@ class SnakeGameAI:
         sidebar_width=860,
         window_h=None,
     ):
-        if render:
-            os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
-        pygame.init()
-
-        self.board_w = w
-        self.board_h = h
-        self.w = w
-        self.h = h
-        self.block_size = block_size
-        self.speed = speed
+        super().__init__(w=w, h=h, block_size=block_size, speed=speed)
         self.render = render
         self.sidebar_width = sidebar_width if render else 0
         requested_window_h = window_h if window_h is not None else self.board_h
         requested_window_w = self.board_w + self.sidebar_width
-        
+
         self.logical_w = requested_window_w
         self.logical_h = max(self.board_h, requested_window_h)
-
         self.window_w = self.logical_w
         self.window_h = self.logical_h
-        
-        self.quit_requested = False
-        self.dashboard_data = {}
-        self.reward_config = {"food": 10.0, "death": -10.0, "step": 0.0}
+
+        pygame.init()
+        if render:
+            os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+        else:
+            # Keep the headless wrapper aligned with the board-only logic footprint.
+            self.sidebar_width = 0
 
         if self.render:
             available_w, available_h = get_available_display_area()
@@ -123,7 +342,6 @@ class SnakeGameAI:
             self._glow_surface = None
 
         self.clock = pygame.time.Clock()
-        self.reset()
 
     def scale_events(self, events):
         if not hasattr(self, "_real_display") or self._real_display is None:

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import random
-from collections import deque
-from typing import Deque, Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Sequence
 
 try:
     import numpy as np
@@ -83,14 +82,19 @@ def load_checkpoint_network_config(path: str) -> dict:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.memory: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(
-            maxlen=capacity
-        )
+    def __init__(self, capacity: int, state_dim: int):
+        self.capacity = int(capacity)
+        self.state_dim = int(state_dim)
+        self.position = 0
+        self.size = 0
+        self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+        self.next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+        self.actions = np.zeros(self.capacity, dtype=np.int64)
+        self.rewards = np.zeros(self.capacity, dtype=np.float32)
+        self.dones = np.zeros(self.capacity, dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self.memory)
+        return int(self.size)
 
     def add(
         self,
@@ -100,36 +104,137 @@ class ReplayBuffer:
         next_state: np.ndarray,
         done: bool,
     ) -> None:
-        self.memory.append(
-            (
-                np.asarray(state, dtype=np.float32),
-                int(action_index),
-                float(reward),
-                np.asarray(next_state, dtype=np.float32),
-                bool(done),
-            )
-        )
+        index = self.position
+        self.states[index] = np.asarray(state, dtype=np.float32)
+        self.actions[index] = int(action_index)
+        self.rewards[index] = float(reward)
+        self.next_states[index] = np.asarray(next_state, dtype=np.float32)
+        self.dones[index] = float(done)
+        self.position = (self.position + 1) % self.capacity
+        self.size = min(self.capacity, self.size + 1)
+
+    def add_batch(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_states: np.ndarray,
+        dones: np.ndarray,
+    ) -> None:
+        states = np.asarray(states, dtype=np.float32)
+        next_states = np.asarray(next_states, dtype=np.float32)
+        actions = np.asarray(actions, dtype=np.int64)
+        rewards = np.asarray(rewards, dtype=np.float32)
+        dones = np.asarray(dones, dtype=np.float32)
+        batch_size = int(states.shape[0])
+        if batch_size <= 0:
+            return
+        if batch_size >= self.capacity:
+            states = states[-self.capacity :]
+            actions = actions[-self.capacity :]
+            rewards = rewards[-self.capacity :]
+            next_states = next_states[-self.capacity :]
+            dones = dones[-self.capacity :]
+            batch_size = self.capacity
+
+        end = self.position + batch_size
+        if end <= self.capacity:
+            indices = slice(self.position, end)
+            self.states[indices] = states
+            self.actions[indices] = actions
+            self.rewards[indices] = rewards
+            self.next_states[indices] = next_states
+            self.dones[indices] = dones
+        else:
+            first_count = self.capacity - self.position
+            second_count = batch_size - first_count
+            self.states[self.position :] = states[:first_count]
+            self.actions[self.position :] = actions[:first_count]
+            self.rewards[self.position :] = rewards[:first_count]
+            self.next_states[self.position :] = next_states[:first_count]
+            self.dones[self.position :] = dones[:first_count]
+
+            self.states[:second_count] = states[first_count:]
+            self.actions[:second_count] = actions[first_count:]
+            self.rewards[:second_count] = rewards[first_count:]
+            self.next_states[:second_count] = next_states[first_count:]
+            self.dones[:second_count] = dones[first_count:]
+
+        self.position = (self.position + batch_size) % self.capacity
+        self.size = min(self.capacity, self.size + batch_size)
 
     def sample(self, batch_size: int):
-        batch = random.sample(self.memory, batch_size)
-        states = np.stack([item[0] for item in batch]).astype(np.float32)
-        actions = np.asarray([item[1] for item in batch], dtype=np.int64)
-        rewards = np.asarray([item[2] for item in batch], dtype=np.float32)
-        next_states = np.stack([item[3] for item in batch]).astype(np.float32)
-        dones = np.asarray([item[4] for item in batch], dtype=np.float32)
-        return states, actions, rewards, next_states, dones
+        indices = np.random.randint(0, self.size, size=int(batch_size))
+        return (
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices],
+        )
+
+    def sample_tensors(self, batch_size: int, device: torch.device, pin_memory: bool = False):
+        states, actions, rewards, next_states, dones = self.sample(batch_size)
+        non_blocking = bool(pin_memory and device.type == "cuda")
+
+        def to_device(array, dtype=None):
+            tensor = torch.from_numpy(np.ascontiguousarray(array))
+            if dtype is not None:
+                tensor = tensor.to(dtype=dtype)
+            if non_blocking:
+                tensor = tensor.pin_memory()
+            return tensor.to(device, non_blocking=non_blocking)
+
+        return (
+            to_device(states, dtype=torch.float32),
+            to_device(actions, dtype=torch.long),
+            to_device(rewards, dtype=torch.float32),
+            to_device(next_states, dtype=torch.float32),
+            to_device(dones, dtype=torch.float32),
+        )
 
     def state_dict(self) -> dict:
         return {
-            "capacity": self.capacity,
-            "memory": list(self.memory),
+            "capacity": int(self.capacity),
+            "state_dim": int(self.state_dim),
+            "size": int(self.size),
+            "position": int(self.position),
+            "states": self.states[: self.size].copy(),
+            "actions": self.actions[: self.size].copy(),
+            "rewards": self.rewards[: self.size].copy(),
+            "next_states": self.next_states[: self.size].copy(),
+            "dones": self.dones[: self.size].copy(),
         }
 
     def load_state_dict(self, state: dict) -> None:
         capacity = int(state.get("capacity", self.capacity))
-        raw_memory = state.get("memory", [])
+        state_dim = int(state.get("state_dim", self.state_dim))
         self.capacity = capacity
-        self.memory = deque(raw_memory, maxlen=capacity)
+        self.state_dim = state_dim
+        self.position = int(state.get("position", 0))
+        self.size = int(state.get("size", 0))
+        self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+        self.next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+        self.actions = np.zeros(self.capacity, dtype=np.int64)
+        self.rewards = np.zeros(self.capacity, dtype=np.float32)
+        self.dones = np.zeros(self.capacity, dtype=np.float32)
+
+        if "states" in state:
+            loaded_size = min(self.capacity, int(state.get("size", len(state["states"]))))
+            self.size = loaded_size
+            self.position = int(state.get("position", loaded_size % self.capacity))
+            self.states[:loaded_size] = np.asarray(state["states"], dtype=np.float32)[:loaded_size]
+            self.actions[:loaded_size] = np.asarray(state["actions"], dtype=np.int64)[:loaded_size]
+            self.rewards[:loaded_size] = np.asarray(state["rewards"], dtype=np.float32)[:loaded_size]
+            self.next_states[:loaded_size] = np.asarray(state["next_states"], dtype=np.float32)[:loaded_size]
+            self.dones[:loaded_size] = np.asarray(state["dones"], dtype=np.float32)[:loaded_size]
+            return
+
+        raw_memory = state.get("memory", [])
+        self.position = 0
+        self.size = 0
+        for item in raw_memory[: self.capacity]:
+            self.add(*item)
 
 
 class DQNNetwork(nn.Module):
@@ -207,6 +312,8 @@ class DQNAgent:
         batch_size: int = 256,
         warmup_size: int = 1_000,
         target_sync_interval: int = 250,
+        update_every_transitions: int = 1,
+        gradient_steps_per_update: int = 1,
         hidden_layers: Iterable[int] | None = None,
         device_preference: str = "auto",
     ):
@@ -220,9 +327,13 @@ class DQNAgent:
         self.batch_size = batch_size
         self.warmup_size = warmup_size
         self.target_sync_interval = target_sync_interval
+        self.update_every_transitions = max(1, int(update_every_transitions))
+        self.gradient_steps_per_update = max(1, int(gradient_steps_per_update))
         self.hidden_layers = normalize_hidden_layers(hidden_layers)
         self.n_games = 0
         self.train_steps = 0
+        self.pending_transitions = 0
+        self.pin_memory_transfers = self.device.type == "cuda"
         self.last_train_info = {
             "status": "warmup",
             "loss": None,
@@ -234,6 +345,10 @@ class DQNAgent:
             "synced_target": False,
             "target_sync_remaining": target_sync_interval,
             "grad_norm": None,
+            "did_update": False,
+            "update_count": 0,
+            "batch_size": batch_size,
+            "trainer_mode": "single",
         }
 
         self.policy_net = DQNNetwork(
@@ -251,7 +366,7 @@ class DQNAgent:
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
-        self.replay_buffer = ReplayBuffer(replay_capacity)
+        self.replay_buffer = ReplayBuffer(replay_capacity, len(self.STATE_LABELS))
 
     @property
     def device_label(self) -> str:
@@ -266,6 +381,30 @@ class DQNAgent:
 
     def get_action(self, state: np.ndarray) -> List[int]:
         return self.get_action_selection(state)["action"]
+
+    def configure_training_schedule(
+        self,
+        *,
+        batch_size: int | None = None,
+        warmup_size: int | None = None,
+        target_sync_interval: int | None = None,
+        update_every_transitions: int | None = None,
+        gradient_steps_per_update: int | None = None,
+        trainer_mode: str | None = None,
+    ) -> None:
+        if batch_size is not None:
+            self.batch_size = int(batch_size)
+        if warmup_size is not None:
+            self.warmup_size = int(warmup_size)
+        if target_sync_interval is not None:
+            self.target_sync_interval = int(target_sync_interval)
+        if update_every_transitions is not None:
+            self.update_every_transitions = max(1, int(update_every_transitions))
+        if gradient_steps_per_update is not None:
+            self.gradient_steps_per_update = max(1, int(gradient_steps_per_update))
+        if trainer_mode is not None:
+            self.last_train_info["trainer_mode"] = str(trainer_mode)
+        self.last_train_info["batch_size"] = int(self.batch_size)
 
     def set_device(self, device_preference: str) -> bool:
         normalized = normalize_device_preference(device_preference)
@@ -303,6 +442,27 @@ class DQNAgent:
             return self._build_action_summary(action_index, decision_type)
         return self._build_action_details(action_index, q_values or [], decision_type)
 
+    def get_action_indices_batch(self, states: np.ndarray, greedy: bool = False) -> np.ndarray:
+        states = np.asarray(states, dtype=np.float32)
+        if states.ndim != 2:
+            raise ValueError("states batch must be 2D")
+
+        q_tensor = self._get_q_tensor_batch(states)
+        greedy_actions = torch.argmax(q_tensor, dim=1)
+        chosen = greedy_actions.detach().cpu().numpy().astype(np.int64)
+        if greedy:
+            return chosen
+
+        explore_mask = np.random.random(size=states.shape[0]) < self.epsilon
+        if np.any(explore_mask):
+            chosen[explore_mask] = np.random.randint(
+                0,
+                len(self.ACTION_LABELS),
+                size=int(np.sum(explore_mask)),
+                dtype=np.int64,
+            )
+        return chosen
+
     def get_q_values(self, state: np.ndarray) -> List[float]:
         return self._q_tensor_to_list(self._get_q_tensor(state))
 
@@ -316,8 +476,23 @@ class DQNAgent:
     ) -> None:
         self.replay_buffer.add(state, action_index, reward, next_state, done)
 
-    def train_step(self, collect_diagnostics: bool = True) -> dict:
+    def remember_batch(
+        self,
+        states: np.ndarray,
+        action_indices: np.ndarray,
+        rewards: np.ndarray,
+        next_states: np.ndarray,
+        dones: np.ndarray,
+    ) -> None:
+        self.replay_buffer.add_batch(states, action_indices, rewards, next_states, dones)
+
+    def train_step(
+        self,
+        collect_diagnostics: bool = True,
+        num_new_transitions: int = 1,
+    ) -> dict:
         buffer_size = len(self.replay_buffer)
+        self.pending_transitions += max(0, int(num_new_transitions))
         if buffer_size < max(self.batch_size, self.warmup_size):
             info = {
                 "status": "warmup",
@@ -331,61 +506,105 @@ class DQNAgent:
                 "target_sync_remaining": self.target_sync_interval,
                 "grad_norm": None,
                 "did_update": False,
+                "update_count": 0,
+                "batch_size": int(self.batch_size),
+                "trainer_mode": self.last_train_info.get("trainer_mode", "single"),
             }
             self.last_train_info = info
             return info
 
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(
-            self.batch_size
-        )
+        if self.pending_transitions < self.update_every_transitions:
+            info = dict(self.last_train_info)
+            info.update(
+                {
+                    "status": "collecting",
+                    "buffer_size": buffer_size,
+                    "warmup_remaining": 0,
+                    "did_update": False,
+                    "update_count": 0,
+                    "batch_size": int(self.batch_size),
+                }
+            )
+            self.last_train_info = info
+            return info
 
-        states_t = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        next_states_t = torch.as_tensor(next_states, dtype=torch.float32, device=self.device)
-        actions_t = torch.as_tensor(actions, dtype=torch.long, device=self.device)
-        rewards_t = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
-        dones_t = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
+        self.pending_transitions = max(0, self.pending_transitions - self.update_every_transitions)
 
-        predicted_all = self.policy_net(states_t)
-        predicted_selected = predicted_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
-        with torch.no_grad():
-            next_best = self.target_net(next_states_t).max(dim=1).values
-            target = rewards_t + (1.0 - dones_t) * self.gamma * next_best
-
-        td_error = target - predicted_selected
-        loss = self.loss_fn(predicted_selected, target)
-
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
-        self.optimizer.step()
-
-        self.train_steps += 1
         synced_target = False
-        if self.train_steps % self.target_sync_interval == 0:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
-            synced_target = True
+        loss_values = []
+        td_values = []
+        predicted_values = []
+        target_values = []
+        example_predicted = None
+        example_target = None
+        example_td = None
+        grad_norm_value = None
+
+        update_count = 0
+        for _ in range(self.gradient_steps_per_update):
+            if len(self.replay_buffer) < max(self.batch_size, self.warmup_size):
+                break
+
+            states_t, actions_t, rewards_t, next_states_t, dones_t = self.replay_buffer.sample_tensors(
+                self.batch_size,
+                device=self.device,
+                pin_memory=self.pin_memory_transfers,
+            )
+
+            predicted_all = self.policy_net(states_t)
+            predicted_selected = predicted_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
+
+            with torch.no_grad():
+                next_best = self.target_net(next_states_t).max(dim=1).values
+                target = rewards_t + (1.0 - dones_t) * self.gamma * next_best
+
+            td_error = target - predicted_selected
+            loss = self.loss_fn(predicted_selected, target)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
+            self.optimizer.step()
+
+            self.train_steps += 1
+            update_count += 1
+            if self.train_steps % self.target_sync_interval == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+                synced_target = True
+
+            if collect_diagnostics:
+                loss_values.append(float(loss.detach().cpu().item()))
+                td_values.append(float(td_error.detach().abs().mean().cpu().item()))
+                predicted_values.append(float(predicted_selected.detach().mean().cpu().item()))
+                target_values.append(float(target.detach().mean().cpu().item()))
+                grad_norm_value = float(grad_norm.detach().cpu().item())
+                example_predicted = float(predicted_selected[0].detach().cpu().item())
+                example_target = float(target[0].detach().cpu().item())
+                example_td = float(td_error[0].detach().cpu().item())
 
         info = {
-            "status": "training",
+            "status": "training" if update_count else "collecting",
             "buffer_size": buffer_size,
             "warmup_remaining": 0,
             "synced_target": synced_target,
             "target_sync_remaining": self.target_sync_interval
             - (self.train_steps % self.target_sync_interval),
-            "did_update": True,
+            "did_update": bool(update_count),
+            "update_count": int(update_count),
+            "batch_size": int(self.batch_size),
+            "trainer_mode": self.last_train_info.get("trainer_mode", "single"),
         }
-        if collect_diagnostics:
+        if collect_diagnostics and update_count:
             info.update(
                 {
-                    "loss": float(loss.detach().cpu().item()),
-                    "td_error": float(td_error.detach().abs().mean().cpu().item()),
-                    "predicted_q": float(predicted_selected.detach().mean().cpu().item()),
-                    "target_q": float(target.detach().mean().cpu().item()),
-                    "example_predicted_q": float(predicted_selected[0].detach().cpu().item()),
-                    "example_target_q": float(target[0].detach().cpu().item()),
-                    "example_td_error": float(td_error[0].detach().cpu().item()),
-                    "grad_norm": float(grad_norm.detach().cpu().item()),
+                    "loss": float(sum(loss_values) / max(1, len(loss_values))),
+                    "td_error": float(sum(td_values) / max(1, len(td_values))),
+                    "predicted_q": float(sum(predicted_values) / max(1, len(predicted_values))),
+                    "target_q": float(sum(target_values) / max(1, len(target_values))),
+                    "example_predicted_q": example_predicted,
+                    "example_target_q": example_target,
+                    "example_td_error": example_td,
+                    "grad_norm": grad_norm_value,
                 }
             )
         else:
@@ -620,6 +839,12 @@ class DQNAgent:
             "runtime_config": {
                 "device_preference": self.device_preference,
                 "device_label": self.device_label,
+                "batch_size": int(self.batch_size),
+                "warmup_size": int(self.warmup_size),
+                "target_sync_interval": int(self.target_sync_interval),
+                "update_every_transitions": int(self.update_every_transitions),
+                "gradient_steps_per_update": int(self.gradient_steps_per_update),
+                "pending_transitions": int(self.pending_transitions),
             },
             "extra_state": extra_state or {},
         }
@@ -642,6 +867,21 @@ class DQNAgent:
         self.n_games = int(checkpoint.get("n_games", 0))
         self.train_steps = int(checkpoint.get("train_steps", 0))
         self.last_train_info = checkpoint.get("last_train_info", self.last_train_info)
+        runtime_config = checkpoint.get("runtime_config", {})
+        self.batch_size = int(runtime_config.get("batch_size", self.batch_size))
+        self.warmup_size = int(runtime_config.get("warmup_size", self.warmup_size))
+        self.target_sync_interval = int(
+            runtime_config.get("target_sync_interval", self.target_sync_interval)
+        )
+        self.update_every_transitions = int(
+            runtime_config.get("update_every_transitions", self.update_every_transitions)
+        )
+        self.gradient_steps_per_update = int(
+            runtime_config.get("gradient_steps_per_update", self.gradient_steps_per_update)
+        )
+        self.pending_transitions = int(
+            runtime_config.get("pending_transitions", self.pending_transitions)
+        )
         replay_state = checkpoint.get("replay_buffer")
         if replay_state:
             self.replay_buffer.load_state_dict(replay_state)
@@ -861,6 +1101,11 @@ class DQNAgent:
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             return self.policy_net(state_tensor.unsqueeze(0)).squeeze(0)
+
+    def _get_q_tensor_batch(self, states: np.ndarray):
+        states_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            return self.policy_net(states_tensor)
 
     def _q_tensor_to_list(self, q_tensor) -> List[float]:
         return [float(value) for value in q_tensor.detach().cpu().tolist()]
