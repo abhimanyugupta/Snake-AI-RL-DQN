@@ -65,12 +65,22 @@ def group_entries_by_algo(entries: Iterable[dict]) -> Dict[str, List[dict]]:
 
 def build_history(entries: Iterable[dict]) -> dict:
     rows = list(entries)
+    losses = [
+        0.0 if item.get("loss") is None else float(item.get("loss", 0.0))
+        for item in rows
+    ]
+    loss_moving_avg = []
+    for index in range(len(losses)):
+        recent = losses[max(0, index - 19) : index + 1]
+        loss_moving_avg.append(float(sum(recent) / max(1, len(recent))))
     return {
         "entries": rows,
         "scores": [int(item.get("score", 0)) for item in rows],
         "moving_avg": [float(item.get("moving_avg_20", 0.0)) for item in rows],
         "best_scores": [int(item.get("best_score", 0)) for item in rows],
         "episode_rewards": [float(item.get("episode_reward", 0.0)) for item in rows],
+        "losses": losses,
+        "loss_moving_avg": loss_moving_avg,
     }
 
 

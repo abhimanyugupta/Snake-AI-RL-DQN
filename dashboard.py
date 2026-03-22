@@ -187,6 +187,7 @@ class TrainingDashboard:
         require_manual_start=False,
         initial_fast_mode=False,
         initial_trainer_mode="single",
+        initial_parallel_envs=8,
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -201,6 +202,24 @@ class TrainingDashboard:
         col_x = game.board_w + padding
         slider_width = col_w
         toggle_w = (col_w - 10) // 2
+        dock_padding = 18
+        dock_gap = 12
+        dock_y = game.board_h + 14
+        dock_h = max(138, game.logical_h - dock_y - 16)
+        dock_w = max(260, game.board_w - dock_padding * 2)
+        dock_control_w = min(276, max(236, int(dock_w * 0.42)))
+        self.bottom_dock_rect = pygame.Rect(dock_padding, dock_y, dock_w, dock_h)
+        self.bottom_control_rect = pygame.Rect(dock_padding, dock_y, dock_control_w, dock_h)
+        self.bottom_loss_rect = pygame.Rect(
+            self.bottom_control_rect.right + dock_gap,
+            dock_y,
+            dock_w - dock_control_w - dock_gap,
+            dock_h,
+        )
+        dock_inner_x = self.bottom_control_rect.x + 12
+        dock_inner_w = self.bottom_control_rect.width - 24
+        dock_col_w = (dock_inner_w - 10) // 2
+        dock_row_y = self.bottom_control_rect.y + 28
 
         self.view_mode = "overview"
         self.view_order = ["overview", "network", "algorithm"]
@@ -218,10 +237,12 @@ class TrainingDashboard:
         self.overview_button = ButtonControl("Overview [Tab]", col_x, padding + 44, 156, 30, "overview")
         self.network_button = ButtonControl("Network [N]", col_x + 168, padding + 44, 134, 30, "network")
         self.algorithm_button = ButtonControl("Algorithm [E]", col_x + 314, padding + 44, 144, 30, "algorithm")
+        self.results_button = ButtonControl("Results [R]", col_x + 470, padding + 44, 128, 30, "results")
         self.view_buttons = [
             self.overview_button,
             self.network_button,
             self.algorithm_button,
+            self.results_button,
         ]
 
         y = start_y
@@ -275,9 +296,17 @@ class TrainingDashboard:
         self.episode_input = TextInputControl(
             "Episode goal",
             initial_episode_goal,
-            col_x + toggle_w + 10,
-            y,
-            toggle_w,
+            dock_inner_x,
+            dock_row_y,
+            dock_col_w,
+            28,
+        )
+        self.parallel_env_input = TextInputControl(
+            "Parallel envs",
+            initial_parallel_envs,
+            dock_inner_x + dock_col_w + 10,
+            dock_row_y,
+            dock_col_w,
             28,
         )
         y += 36
@@ -285,15 +314,25 @@ class TrainingDashboard:
         self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 26)
         y += 32
 
-        self.fast_mode_toggle = ToggleControl("Fast Mode [X]", bool(initial_fast_mode), col_x, y, slider_width, 26)
+        dock_row_y += 36
+        self.fast_mode_toggle = ToggleControl(
+            "Fast Mode [X]",
+            bool(initial_fast_mode),
+            dock_inner_x,
+            dock_row_y,
+            dock_inner_w,
+            26,
+        )
         y += 32
 
-        self.cpu_device_button = ButtonControl("CPU [C]", col_x, y, toggle_w, 26, "device_cpu")
-        self.gpu_device_button = ButtonControl("GPU [U]", col_x + toggle_w + 10, y, toggle_w, 26, "device_cuda")
+        dock_row_y += 32
+        self.cpu_device_button = ButtonControl("CPU [C]", dock_inner_x, dock_row_y, dock_col_w, 26, "device_cpu")
+        self.gpu_device_button = ButtonControl("GPU [U]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 26, "device_cuda")
         y += 32
 
-        self.single_trainer_button = ButtonControl("Single [J]", col_x, y, toggle_w, 26, "trainer_single")
-        self.parallel_trainer_button = ButtonControl("Parallel [P]", col_x + toggle_w + 10, y, toggle_w, 26, "trainer_parallel")
+        dock_row_y += 32
+        self.single_trainer_button = ButtonControl("Single [J]", dock_inner_x, dock_row_y, dock_col_w, 26, "trainer_single")
+        self.parallel_trainer_button = ButtonControl("Parallel [P]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 26, "trainer_parallel")
         y += 32
 
         self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 26)
@@ -320,7 +359,7 @@ class TrainingDashboard:
             self.show_avg_toggle,
             self.show_best_toggle,
         ]
-        self.inputs = [self.episode_input]
+        self.inputs = [self.episode_input, self.parallel_env_input]
         self.control_buttons = [
             self.start_button,
             self.cpu_device_button,
@@ -330,11 +369,14 @@ class TrainingDashboard:
         ]
 
         self.initial_episode_goal = initial_episode_goal
+        self.initial_parallel_envs = max(1, int(initial_parallel_envs))
         self.last_reward = 0.0
         self.deep_scores = []
         self.deep_average_history = []
         self.deep_best_history = []
         self.deep_episode_rewards = []
+        self.deep_loss_history = []
+        self.deep_loss_average_history = []
         self.baseline_scores = []
         self.baseline_average_history = []
         self.baseline_best_history = []
@@ -348,6 +390,8 @@ class TrainingDashboard:
         self.graph_hover_index = None
         self.graph_rect = None
         self.baseline_visible = True
+        self.pending_trainer_mode = None
+        self.results_ready = False
 
     @property
     def current_fps(self):
@@ -394,6 +438,82 @@ class TrainingDashboard:
     def get_episode_goal(self):
         return self.episode_input.get_int(default=self.initial_episode_goal)
 
+    def get_parallel_env_count(self):
+        return self.parallel_env_input.get_int(default=self.initial_parallel_envs, minimum=1, maximum=256)
+
+    def available_view_order(self):
+        order = ["overview", "network", "algorithm"]
+        if self.results_ready:
+            order.append("results")
+        return order
+
+    def visible_view_buttons(self):
+        buttons = [
+            self.overview_button.draw_data(self.view_mode == "overview"),
+            self.network_button.draw_data(self.view_mode == "network"),
+            self.algorithm_button.draw_data(self.view_mode == "algorithm"),
+        ]
+        if self.results_ready:
+            buttons.append(self.results_button.draw_data(self.view_mode == "results"))
+        return buttons
+
+    def active_view_button_controls(self):
+        buttons = [self.overview_button, self.network_button, self.algorithm_button]
+        if self.results_ready:
+            buttons.append(self.results_button)
+        return buttons
+
+    def set_results_ready(self, ready=True, auto_focus=False):
+        self.results_ready = bool(ready)
+        if not self.results_ready and self.view_mode == "results":
+            self.view_mode = "overview"
+        elif self.results_ready and auto_focus:
+            self.view_mode = "results"
+
+    def export_deep_history(self):
+        return {
+            "scores": list(self.deep_scores),
+            "moving_avg": list(self.deep_average_history),
+            "best_scores": list(self.deep_best_history),
+            "episode_rewards": list(self.deep_episode_rewards),
+            "losses": list(self.deep_loss_history),
+            "loss_moving_avg": list(self.deep_loss_average_history),
+        }
+
+    def export_baseline_history(self):
+        return {
+            "scores": list(self.baseline_scores),
+            "moving_avg": list(self.baseline_average_history),
+            "best_scores": list(self.baseline_best_history),
+            "episode_rewards": list(self.baseline_episode_rewards),
+        }
+
+    def queue_or_set_trainer_mode(self, requested_mode):
+        normalized = "parallel" if str(requested_mode).lower() == "parallel" else "single"
+        if not self.started:
+            self.selected_trainer_mode = normalized
+            self.pending_trainer_mode = None
+            return
+
+        if normalized == self.selected_trainer_mode:
+            self.pending_trainer_mode = None
+            return
+
+        if self.pending_trainer_mode == normalized:
+            self.pending_trainer_mode = None
+            return
+
+        self.pending_trainer_mode = normalized
+
+    def consume_pending_trainer_mode(self):
+        pending = self.pending_trainer_mode
+        if pending and pending != self.selected_trainer_mode:
+            self.pending_trainer_mode = None
+            self.selected_trainer_mode = pending
+            return pending
+        self.pending_trainer_mode = None
+        return None
+
     def should_draw_frame(self, step_number, force=False):
         if self.headless_toggle.value:
             return False
@@ -406,6 +526,10 @@ class TrainingDashboard:
         self.deep_average_history = list(history.get("moving_avg", []))
         self.deep_best_history = list(history.get("best_scores", []))
         self.deep_episode_rewards = list(history.get("episode_rewards", []))
+        self.deep_loss_history = [float(value) for value in history.get("losses", [])]
+        self.deep_loss_average_history = [
+            float(value) for value in history.get("loss_moving_avg", [])
+        ]
 
     def set_baseline_history(self, history):
         self.baseline_scores = list(history.get("scores", []))
@@ -416,7 +540,7 @@ class TrainingDashboard:
     def set_baseline_visibility(self, visible):
         self.baseline_visible = bool(visible)
 
-    def record_deep_episode(self, score, episode_reward):
+    def record_deep_episode(self, score, episode_reward, loss=None):
         self.deep_scores.append(score)
         self.deep_episode_rewards.append(float(episode_reward))
         recent_scores = self.deep_scores[-20:]
@@ -424,11 +548,17 @@ class TrainingDashboard:
         self.deep_average_history.append(moving_average)
         best_score = max(self.deep_best_history[-1], score) if self.deep_best_history else score
         self.deep_best_history.append(best_score)
+        loss_value = 0.0 if loss is None else float(loss)
+        self.deep_loss_history.append(loss_value)
+        recent_losses = self.deep_loss_history[-20:]
+        self.deep_loss_average_history.append(sum(recent_losses) / len(recent_losses))
 
     def sync_graph_rect(self, game):
         data = game.dashboard_data
         if data and "_graph_rect" in data:
             self.graph_rect = data["_graph_rect"]
+        else:
+            self.graph_rect = None
 
     def graph_total_points(self):
         total = 0
@@ -460,7 +590,7 @@ class TrainingDashboard:
             if self._handle_graph_event(event):
                 continue
 
-            for button in self.view_buttons:
+            for button in self.active_view_button_controls():
                 if button.handle_event(event):
                     self.view_mode = button.mode_value
                     break
@@ -545,12 +675,16 @@ class TrainingDashboard:
             if self.started:
                 self.pause_toggle.toggle()
         elif key == pygame.K_TAB:
-            current_index = self.view_order.index(self.view_mode)
-            self.view_mode = self.view_order[(current_index + 1) % len(self.view_order)]
+            order = self.available_view_order()
+            current_view = self.view_mode if self.view_mode in order else "overview"
+            current_index = order.index(current_view)
+            self.view_mode = order[(current_index + 1) % len(order)]
         elif key == pygame.K_n:
             self.view_mode = "network"
         elif key == pygame.K_e:
             self.view_mode = "algorithm"
+        elif key == pygame.K_r and self.results_ready:
+            self.view_mode = "results"
         elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self._handle_control_button("start")
         elif key == pygame.K_a:
@@ -603,14 +737,16 @@ class TrainingDashboard:
         if mode_value == "start":
             self.started = True
             self.pause_toggle.value = False
+        elif mode_value == "results" and self.results_ready:
+            self.view_mode = "results"
         elif mode_value == "device_cpu":
             self.selected_device_preference = "cpu"
         elif mode_value == "device_cuda" and self.cuda_available:
             self.selected_device_preference = "cuda"
-        elif mode_value == "trainer_single" and not self.started:
-            self.selected_trainer_mode = "single"
-        elif mode_value == "trainer_parallel" and not self.started:
-            self.selected_trainer_mode = "parallel"
+        elif mode_value == "trainer_single":
+            self.queue_or_set_trainer_mode("single")
+        elif mode_value == "trainer_parallel":
+            self.queue_or_set_trainer_mode("parallel")
 
     def build_dashboard_data(
         self,
@@ -625,6 +761,8 @@ class TrainingDashboard:
         lightweight=False,
         show_baseline=None,
     ):
+        if self.view_mode == "results" and not self.results_ready:
+            self.view_mode = "overview"
         show_baseline = self.baseline_visible if show_baseline is None else bool(show_baseline)
         trainer_mode = str(context.get("trainer_mode", "single")).strip().lower()
         parallel_envs = int(max(1, context.get("parallel_envs", 1)))
@@ -648,6 +786,7 @@ class TrainingDashboard:
         fast_mode_effective = bool(context.get("fast_mode_effective", False))
         fast_tail_episodes = int(context.get("fast_tail_episodes", 5))
         episodes_remaining = int(context.get("episodes_remaining", 0))
+        completed_runs = len(self.deep_scores)
 
         if lightweight:
             network_view = {
@@ -733,6 +872,11 @@ class TrainingDashboard:
         elif fast_mode_effective and not lightweight:
             help_lines.append(
                 f"[accent]Fast mode is active. The final {fast_tail_episodes} episode(s) are animated."
+            )
+        if self.pending_trainer_mode:
+            help_lines.append(
+                f"[accent]Queued trainer mode: {self.pending_trainer_mode.capitalize()}. "
+                "It will apply at the next safe boundary."
             )
 
         best_q = max(q_values)
@@ -840,6 +984,71 @@ class TrainingDashboard:
                 "thickness": 1,
             },
         ]
+        loss_graph_series = [
+            {
+                "label": "Loss",
+                "values": self.deep_loss_history,
+                "visible": bool(self.deep_loss_history),
+                "color": (255, 132, 86),
+                "thickness": 1,
+            },
+            {
+                "label": "Loss avg",
+                "values": self.deep_loss_average_history,
+                "visible": bool(self.deep_loss_average_history),
+                "color": (255, 214, 110),
+                "thickness": 2,
+            },
+        ]
+        results_score_series = [
+            {
+                "label": "Score",
+                "values": list(self.deep_scores),
+                "visible": True,
+                "color": (80, 190, 255),
+                "thickness": 1,
+            },
+            {
+                "label": "Avg (20)",
+                "values": list(self.deep_average_history),
+                "visible": True,
+                "color": (80, 230, 120),
+                "thickness": 2,
+            },
+            {
+                "label": "Best",
+                "values": list(self.deep_best_history),
+                "visible": True,
+                "color": (255, 196, 68),
+                "thickness": 1,
+            },
+        ]
+        results_loss_series = [
+            {
+                "label": "Loss",
+                "values": list(self.deep_loss_history),
+                "visible": True,
+                "color": (255, 132, 86),
+                "thickness": 1,
+            },
+            {
+                "label": "Loss avg",
+                "values": list(self.deep_loss_average_history),
+                "visible": True,
+                "color": (255, 214, 110),
+                "thickness": 2,
+            },
+        ]
+        results_summary_lines = [
+            f"Completed runs: {completed_runs}",
+            f"Best score: {max(self.deep_best_history) if self.deep_best_history else 0}",
+            f"Final epsilon: {agent.epsilon:.3f}",
+            f"Device: {agent.device_label}",
+            f"Trainer mode: {trainer_mode.capitalize()}",
+            f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
+            f"Architecture: {agent.architecture_label}",
+            f"Latest loss: {self._format_metric(train_info.get('loss'))}",
+        ]
 
         comparison_lines = self._build_comparison_lines(
             show_baseline=show_baseline,
@@ -852,16 +1061,13 @@ class TrainingDashboard:
         algorithm_sections = self._build_algorithm_sections(agent, action_info, context)
         control_panel = self._build_control_panel()
         control_sections = self._build_control_sections()
+        bottom_dock = self._build_bottom_dock_layout()
 
         return {
             "panel_title": "Snake Deep RL Lab",
             "view_mode": self.view_mode,
             "metrics_row_h": self.metrics_row_h,
-            "view_buttons": [
-                self.overview_button.draw_data(self.view_mode == "overview"),
-                self.network_button.draw_data(self.view_mode == "network"),
-                self.algorithm_button.draw_data(self.view_mode == "algorithm"),
-            ],
+            "view_buttons": self.visible_view_buttons(),
             "metrics": metrics,
             "sliders": [
                 self.speed_slider.draw_data(
@@ -902,6 +1108,12 @@ class TrainingDashboard:
             "network_view": network_view,
             "control_panel": control_panel,
             "control_sections": control_sections,
+            "bottom_dock": bottom_dock,
+            "loss_graph_series": loss_graph_series,
+            "results_ready": self.results_ready,
+            "results_score_series": results_score_series,
+            "results_loss_series": results_loss_series,
+            "results_summary_lines": results_summary_lines,
         }
 
     def _build_comparison_lines(
@@ -1048,18 +1260,64 @@ class TrainingDashboard:
         ]
 
     def _build_control_panel(self):
-        min_x = min(slider.track_rect.x for slider in self.sliders)
-        max_right = max(slider.track_rect.right for slider in self.sliders)
+        sidebar_controls = [
+            self.speed_slider,
+            self.food_reward_slider,
+            self.death_reward_slider,
+            self.step_reward_slider,
+            self.show_arrows_toggle,
+            self.show_dangers_toggle,
+            self.show_graph_toggle,
+            self.pause_toggle,
+            self.start_button,
+            self.turbo_toggle,
+            self.keep_open_toggle,
+            self.headless_toggle,
+            self.show_scores_toggle,
+            self.show_avg_toggle,
+            self.show_best_toggle,
+        ]
+        def control_rect(control):
+            return control.track_rect if hasattr(control, "track_rect") else control.rect
+        min_x = min(
+            control_rect(control).x
+            for control in sidebar_controls
+        )
+        max_right = max(
+            control_rect(control).right
+            for control in sidebar_controls
+        )
         min_y = self.speed_slider.track_rect.y - 30
-        max_bottom = max(toggle.rect.bottom for toggle in self.toggles)
-        max_bottom = max(max_bottom, max(input_control.rect.bottom for input_control in self.inputs))
-        max_bottom = max(max_bottom, max(button.rect.bottom for button in self.control_buttons))
+        max_bottom = max(
+            self.show_best_toggle.rect.bottom,
+            self.keep_open_toggle.rect.bottom,
+            self.headless_toggle.rect.bottom,
+            self.start_button.rect.bottom,
+        )
         return {
             "x": min_x - 14,
             "y": min_y - 18,
             "w": (max_right - min_x) + 28,
             "h": (max_bottom - min_y) + 32,
             "title": "Controls",
+        }
+
+    def _build_bottom_dock_layout(self):
+        return {
+            "controls_rect": {
+                "x": self.bottom_control_rect.x,
+                "y": self.bottom_control_rect.y,
+                "w": self.bottom_control_rect.width,
+                "h": self.bottom_control_rect.height,
+                "title": "Run Setup",
+            },
+            "loss_rect": {
+                "x": self.bottom_loss_rect.x,
+                "y": self.bottom_loss_rect.y,
+                "w": self.bottom_loss_rect.width,
+                "h": self.bottom_loss_rect.height,
+                "title": "Loss Trend",
+            },
         }
 
     def _build_control_sections(self):
@@ -1082,6 +1340,24 @@ class TrainingDashboard:
                 )
             )
 
+        single_label = "Single [J]"
+        parallel_label = "Parallel [P]"
+        single_active = self.selected_trainer_mode == "single"
+        parallel_active = self.selected_trainer_mode == "parallel"
+        single_style = "default"
+        parallel_style = "default"
+        if self.started:
+            if self.selected_trainer_mode == "single":
+                single_label = "Single live [J]"
+            else:
+                parallel_label = "Parallel live [P]"
+            if self.pending_trainer_mode == "single":
+                single_label = "Single queued [J]"
+                single_style = "queued"
+            elif self.pending_trainer_mode == "parallel":
+                parallel_label = "Parallel queued [P]"
+                parallel_style = "queued"
+
         buttons.append(
             self.cpu_device_button.draw_data(
                 active=self.selected_device_preference == "cpu",
@@ -1097,14 +1373,16 @@ class TrainingDashboard:
         )
         buttons.append(
             self.single_trainer_button.draw_data(
-                active=self.selected_trainer_mode == "single",
-                disabled=self.started,
+                active=single_active,
+                style=single_style,
+                label=single_label,
             )
         )
         buttons.append(
             self.parallel_trainer_button.draw_data(
-                active=self.selected_trainer_mode == "parallel",
-                disabled=self.started,
+                active=parallel_active,
+                style=parallel_style,
+                label=parallel_label,
             )
         )
         return buttons

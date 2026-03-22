@@ -826,6 +826,10 @@ class SnakeGameAI(SnakeLogicEnv):
             full_rect = pygame.Rect(left_col.x, left_col.y, left_col.width + right_col.width + col_gap, left_col.height)
             self._draw_network_page(full_rect, data)
             return
+        if data.get("view_mode") == "results":
+            full_rect = pygame.Rect(left_col.x, left_col.y, left_col.width + right_col.width + col_gap, left_col.height)
+            self._draw_results_page(full_rect, data)
+            return
 
         overview_rect = pygame.Rect(
             left_col.x,
@@ -864,6 +868,10 @@ class SnakeGameAI(SnakeLogicEnv):
             self._draw_card_background(panel_rect)
             title_surface = self.small_font.render(control_panel.get("title", "Controls"), True, (250, 252, 255))
             self.display.blit(title_surface, (panel_rect.x + 12, panel_rect.y + 10))
+
+        bottom_dock = data.get("bottom_dock")
+        if bottom_dock:
+            self._draw_bottom_dock(bottom_dock, data)
 
         self._draw_controls(data)
 
@@ -919,6 +927,27 @@ class SnakeGameAI(SnakeLogicEnv):
                 replay_h,
             )
             self._draw_recent_replays_card(replay_rect, replay_data)
+
+    def _draw_bottom_dock(self, dock_data, data):
+        controls_rect_data = dock_data.get("controls_rect")
+        if controls_rect_data:
+            controls_rect = pygame.Rect(
+                controls_rect_data["x"],
+                controls_rect_data["y"],
+                controls_rect_data["w"],
+                controls_rect_data["h"],
+            )
+            self._draw_card_background(controls_rect)
+
+        loss_rect_data = dock_data.get("loss_rect")
+        if loss_rect_data:
+            loss_rect = pygame.Rect(
+                loss_rect_data["x"],
+                loss_rect_data["y"],
+                loss_rect_data["w"],
+                loss_rect_data["h"],
+            )
+            self._draw_loss_graph(loss_rect, data)
 
     def _draw_card_background(self, rect):
         """Draw a premium dark card with subtle borders."""
@@ -1404,6 +1433,10 @@ class SnakeGameAI(SnakeLogicEnv):
                 base_color = (74, 126, 192) if active else (50, 52, 60)
                 border_color = (112, 185, 255) if active else (40, 42, 48)
                 text_color = (255, 255, 255) if active else (180, 185, 195)
+            elif style == "queued":
+                base_color = (110, 86, 34)
+                border_color = (245, 190, 80)
+                text_color = (255, 244, 220)
             else:
                 base_color = (56, 60, 70) if active else (50, 52, 60)
                 border_color = (100, 210, 255) if active else (40, 42, 48)
@@ -1579,22 +1612,101 @@ class SnakeGameAI(SnakeLogicEnv):
             )
             self._draw_text_card(card_rect, section.get("title", "Section"), section.get("lines", []))
 
+    def _draw_results_page(self, rect, data):
+        data["_graph_rect"] = None
+        summary_lines = data.get("results_summary_lines", [])
+        score_series = data.get("results_score_series", [])
+        loss_series = data.get("results_loss_series", [])
+
+        summary_h = max(142, 54 + len(summary_lines) * 18)
+        score_h = max(160, (rect.height - summary_h - 24) // 2)
+        summary_rect = pygame.Rect(rect.x, rect.y, rect.width, summary_h)
+        score_rect = pygame.Rect(rect.x, summary_rect.bottom + 12, rect.width, score_h)
+        loss_rect = pygame.Rect(rect.x, score_rect.bottom + 12, rect.width, rect.bottom - score_rect.bottom - 12)
+
+        self._draw_text_card(summary_rect, "Full Run Summary", summary_lines)
+        score_total = max((len(item.get("values", [])) for item in score_series), default=0)
+        loss_total = max((len(item.get("values", [])) for item in loss_series), default=0)
+        self._draw_series_graph(
+            score_rect,
+            "Full Score History",
+            score_series,
+            view_size=max(2, score_total or 2),
+            view_end=score_total or None,
+            hover_index=None,
+            empty_message="Score history will appear once completed runs are available.",
+            min_value=0.0,
+            min_ceiling=1.0,
+            show_window_bar=False,
+        )
+        self._draw_series_graph(
+            loss_rect,
+            "Full Loss History",
+            loss_series,
+            view_size=max(2, loss_total or 2),
+            view_end=loss_total or None,
+            hover_index=None,
+            empty_message="Loss history will appear once training updates have been recorded.",
+            min_value=0.0,
+            min_ceiling=0.02,
+            show_window_bar=False,
+        )
+
     def _draw_graph(self, rect, data):
         if not data.get("show_graph"):
+            data["_graph_rect"] = None
             return
+        self._draw_series_graph(
+            rect,
+            "Training Comparison",
+            data.get("graph_series", []),
+            view_size=data.get("graph_view_size", 60),
+            view_end=data.get("graph_view_end"),
+            hover_index=data.get("graph_hover_index"),
+            empty_message="Waiting for data...",
+            min_value=0.0,
+            min_ceiling=1.0,
+        )
 
+    def _draw_loss_graph(self, rect, data):
+        self._draw_series_graph(
+            rect,
+            "Loss Trend",
+            data.get("loss_graph_series", []),
+            view_size=data.get("graph_view_size", 60),
+            view_end=data.get("graph_view_end"),
+            hover_index=None,
+            empty_message="Loss values will appear after completed episodes.",
+            min_value=0.0,
+            min_ceiling=0.02,
+        )
+
+    def _draw_series_graph(
+        self,
+        rect,
+        title_text,
+        raw_series,
+        *,
+        view_size=60,
+        view_end=None,
+        hover_index=None,
+        empty_message="Waiting for data...",
+        min_value=0.0,
+        min_ceiling=1.0,
+        show_window_bar=True,
+    ):
         self._draw_card_background(rect)
 
-        title = self.tiny_font.render("Training Comparison", True, (250, 252, 255))
+        title = self.tiny_font.render(title_text, True, (250, 252, 255))
         self.display.blit(title, (rect.x + 12, rect.y + 12))
 
         series = [
             item
-            for item in data.get("graph_series", [])
+            for item in raw_series
             if item.get("visible", True) and len(item.get("values", [])) > 0
         ]
         if not series:
-            no_data = self.tiny_font.render("Waiting for data...", True, (120, 125, 135))
+            no_data = self.tiny_font.render(empty_message, True, (120, 125, 135))
             self.display.blit(no_data, (rect.x + 12, rect.y + 40))
             return
 
@@ -1614,18 +1726,11 @@ class SnakeGameAI(SnakeLogicEnv):
 
         total = max(len(item.get("values", [])) for item in series)
         if total < 2:
-            no_data = self.tiny_font.render("Waiting for data...", True, (120, 125, 135))
+            no_data = self.tiny_font.render(empty_message, True, (120, 125, 135))
             self.display.blit(no_data, (rect.x + 12, rect.y + 40))
             return
 
-        view_size = data.get("graph_view_size", 60)
-        view_end = data.get("graph_view_end")
-        if view_end is None:
-            view_end = total
-        view_size = max(10, min(total, int(view_size)))
-        view_end = max(view_size, min(total, int(view_end)))
-        view_start = max(0, view_end - view_size)
-
+        view_size, view_end, view_start = self._resolve_graph_window(total, view_size, view_end)
         plot_rect = pygame.Rect(
             rect.x + 46,
             legend_y + 24,
@@ -1636,17 +1741,21 @@ class SnakeGameAI(SnakeLogicEnv):
         pygame.draw.rect(self.display, (20, 22, 26), plot_rect, border_radius=4)
         pygame.draw.rect(self.display, (40, 42, 48), plot_rect, width=1, border_radius=4)
 
-        max_value = 1
-        for item in series:
-            values = item.get("values", [])[view_start:view_end]
-            if values:
-                max_value = max(max_value, max(values))
+        min_value = float(min_value)
+        max_value = self._resolve_graph_max_value(
+            series,
+            view_start,
+            view_end,
+            min_value=min_value,
+            min_ceiling=min_ceiling,
+        )
+        value_span = max(1e-6, max_value - min_value)
 
         tick_count = 4
         for tick in range(tick_count + 1):
             ratio = tick / tick_count
             y = plot_rect.bottom - int(ratio * plot_rect.height)
-            tick_value = max_value * ratio
+            tick_value = min_value + value_span * ratio
             pygame.draw.line(
                 self.display,
                 (44, 48, 56),
@@ -1685,43 +1794,46 @@ class SnakeGameAI(SnakeLogicEnv):
                 self._draw_graph_line(
                     plot_rect,
                     values,
+                    min_value,
                     max_value,
                     tuple(item.get("color", (200, 200, 200))),
                     thickness=item.get("thickness", 2),
                 )
 
-        hover_idx = data.get("graph_hover_index")
-        if hover_idx is not None and view_start <= hover_idx < view_end:
-            local_idx = hover_idx - view_start
+        if hover_index is not None and view_start <= hover_index < view_end:
+            local_idx = hover_index - view_start
             px = plot_rect.x + int(local_idx / max(1, view_size - 1) * plot_rect.width)
             pygame.draw.line(self.display, (255, 255, 255, 120), (px, plot_rect.y), (px, plot_rect.bottom), 1)
 
-            tooltip_lines = [f"Episode {hover_idx + 1}"]
+            tooltip_lines = [f"Episode {hover_index + 1}"]
             for item in series:
                 values = item.get("values", [])
-                if hover_idx < len(values):
-                    value = values[hover_idx]
+                if hover_index < len(values):
+                    value = values[hover_index]
                     color = tuple(item.get("color", (200, 200, 200)))
-                    point_y = plot_rect.bottom - int((value / max_value) * plot_rect.height)
+                    normalized = (value - min_value) / value_span
+                    point_y = plot_rect.bottom - int(normalized * plot_rect.height)
                     point_y = max(plot_rect.top, min(plot_rect.bottom, point_y))
                     pygame.draw.circle(self.display, color, (px, point_y), 4)
-                    tooltip_lines.append(f"{item.get('label', 'Series')}: {value:.2f}")
+                    tooltip_lines.append(
+                        f"{item.get('label', 'Series')}: {self._format_axis_value(value)}"
+                    )
             tip_x = min(px + 8, plot_rect.right - 170)
             tip_y = plot_rect.y + 8
             self._draw_tooltip(tip_x, tip_y, tooltip_lines)
 
-        bar_y = rect.bottom - 18
-        bar_rect = pygame.Rect(rect.x + 15, bar_y, rect.width - 30, 8)
-        pygame.draw.rect(self.display, (30, 32, 38), bar_rect, border_radius=4)
+        if show_window_bar:
+            bar_y = rect.bottom - 18
+            bar_rect = pygame.Rect(rect.x + 15, bar_y, rect.width - 30, 8)
+            pygame.draw.rect(self.display, (30, 32, 38), bar_rect, border_radius=4)
 
-        if total > view_size:
-            thumb_ratio = view_size / total
-            thumb_w = max(12, int(bar_rect.width * thumb_ratio))
-            thumb_x = bar_rect.x + int((view_start / total) * bar_rect.width)
-            thumb_rect = pygame.Rect(thumb_x, bar_y, thumb_w, 8)
-            pygame.draw.rect(self.display, (80, 190, 255), thumb_rect, border_radius=4)
+            if total > view_size:
+                thumb_ratio = view_size / total
+                thumb_w = max(12, int(bar_rect.width * thumb_ratio))
+                thumb_x = bar_rect.x + int((view_start / total) * bar_rect.width)
+                thumb_rect = pygame.Rect(thumb_x, bar_y, thumb_w, 8)
+                pygame.draw.rect(self.display, (80, 190, 255), thumb_rect, border_radius=4)
 
-        # Range label
         range_text = f"Episodes {view_start + 1}-{view_end} of {total}"
         range_surf = self.tiny_font.render(range_text, True, (140, 145, 155))
         self.display.blit(range_surf, (rect.right - 15 - range_surf.get_width(), rect.y + 12))
@@ -1730,14 +1842,35 @@ class SnakeGameAI(SnakeLogicEnv):
         self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, plot_rect.bottom + 2))
         self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, plot_rect.bottom + 2))
 
-    def _draw_graph_line(self, rect, values, max_value, color, thickness=2):
+    def _resolve_graph_window(self, total, view_size, view_end):
+        if view_end is None:
+            view_end = total
+        view_size = max(2, min(total, int(view_size)))
+        view_end = max(view_size, min(total, int(view_end)))
+        view_start = max(0, view_end - view_size)
+        return view_size, view_end, view_start
+
+    def _resolve_graph_max_value(self, series, view_start, view_end, *, min_value=0.0, min_ceiling=1.0):
+        max_value = float(min_ceiling)
+        for item in series:
+            values = item.get("values", [])[view_start:view_end]
+            if values:
+                max_value = max(max_value, max(values))
+        if max_value <= min_value:
+            max_value = min_value + max(0.001, float(min_ceiling))
+        else:
+            max_value += max(0.001, (max_value - min_value) * 0.08)
+        return max_value
+
+    def _draw_graph_line(self, rect, values, min_value, max_value, color, thickness=2):
         if len(values) < 2:
             return
 
+        value_span = max(1e-6, max_value - min_value)
         points = []
         for index, value in enumerate(values):
             ratio_x = index / (len(values) - 1)
-            ratio_y = 0 if max_value == 0 else value / max_value
+            ratio_y = (value - min_value) / value_span
             x = rect.x + int(ratio_x * rect.width)
             y = rect.bottom - int(ratio_y * rect.height)
             
@@ -1754,7 +1887,11 @@ class SnakeGameAI(SnakeLogicEnv):
             return f"{value:.0f}"
         if value >= 1:
             return f"{value:.1f}"
-        return f"{value:.2f}"
+        if value >= 0.1:
+            return f"{value:.2f}"
+        if value >= 0.01:
+            return f"{value:.3f}"
+        return f"{value:.4f}"
 
     def _draw_overlay_message(self):
         title = self.dashboard_data.get("overlay_title")

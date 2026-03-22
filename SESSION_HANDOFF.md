@@ -159,6 +159,40 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - CPU/GPU device changes are wired through the runtime
   - rendered training uses the `Start` gate again
   - viewer and trainer now both pass device state into the dashboard cleanly
+- rebalanced the `Overview` layout to use the empty lower-left area under the board:
+  - moved run-setup controls into a new bottom dock under the board
+  - added a GUI `Parallel envs` input box there
+  - added a dedicated `Loss Trend` graph there that tracks per-episode loss and moving average
+  - kept the main right-side graph focused on score/comparison history
+- added post-run results and replay behavior:
+  - successful runs now enter a post-run results state instead of simply exiting
+  - `No Render` sessions can still capture the final 3 replayable runs and open a post-run results window afterward
+  - replay storage now uses compact logical frame snapshots instead of only relying on render-time dashboard captures
+  - replay playback rebuilds the dashboard frame from stored logical state, action info, and context
+  - the newest 3 captured runs remain in-memory only and are still not checkpointed
+- added a post-training `Results [R]` tab:
+  - it appears only after training finishes
+  - it shows full-run score, moving-average, best-score, loss, and loss-average history
+  - the finished flow auto-focuses `Results`
+  - the full results view is exported as `training_summary.png` in this project folder on each completed run
+- trainer-mode switching is now queue-based during active training:
+  - `Single [J]` / `Parallel [P]` no longer look silently broken after start
+  - clicking the inactive mode during training now queues a switch
+  - the queue applies at safe boundaries:
+    - next episode boundary in single mode
+    - after the current bulk iteration in parallel bulk mode
+    - after the current evaluation episode in parallel eval mode
+  - the dashboard labels and help text now show the queued trainer mode clearly
+  - queued trainer-mode buttons now use a separate amber-style treatment so they are visually distinct from the currently live mode
+- improved the pre-start lobby messaging:
+  - the `Mode` metric now reflects whether the run is preparing single training, fast mode, or parallel mode
+  - the start overlay subtitle now explains what fast mode or parallel mode will do before training begins
+- generalized the shared graph renderer:
+  - the score graph keeps its existing scale behavior
+  - the loss graph now scales to the visible low loss values instead of pinning to `1.0`
+  - the full-run results plots reuse the same graph renderer with full-history ranges
+  - full-history results plots now use the real completed-episode range instead of forcing a fake 10-episode window on very short runs
+  - the results summary card height now grows with the summary text so longer session summaries do not clip
 
 ## Validation completed
 
@@ -169,6 +203,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - `snake_game.py`
   - `train.py`
   - `visualizer.py`
+  - `metrics_utils.py`
 - verified in code that:
   - rendered training waits for `Start` before stepping the environment
   - `No Render` still auto-starts
@@ -180,12 +215,33 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - stripped fast episodes no longer request pacing through `play_step(...)`
   - the DQN fast path can choose actions without building full Q-value payloads every step
   - the new parallel-mode CLI, dashboard state, and training code compile cleanly with the rest of the project
+  - the new post-run/results flow compiles cleanly with:
+    - no-render replay capture
+    - queued single/parallel mode switching
+    - full-history results plots
+    - `training_summary.png` export
+- ran limited runtime smoke checks on this machine:
+  - `python train.py --episodes 2 --no-render`
+    - training completed far enough to write:
+      - `dqn_checkpoint.pt`
+      - `training_metrics.jsonl`
+      - `training_summary.png`
+    - the process then stayed alive until timeout, which matches the intended new post-run results-window behavior
+  - `python train.py --episodes 5 --trainer-mode parallel --parallel-envs 4 --eval-tail-episodes 2 --no-render`
+    - training completed far enough to update:
+      - `dqn_checkpoint.pt`
+      - `training_metrics.jsonl`
+      - `training_summary.png`
+    - the process then stayed alive until timeout, again consistent with the intended post-run results hold state
+- captured real window images during local verification:
+  - the pre-start rendered dashboard appears and lays out correctly
+  - a direct `PrintWindow` capture confirms the live window can be inspected programmatically
+  - fully automated start-button interaction is still unreliable in this environment, so real manual in-window verification is still needed for interactive controls
 
 ## Blocked / not yet verified
 
 - real runtime testing is still blocked in this sandbox by missing third-party packages
 - the following have **not** been visually or behaviorally verified here:
-  - `train.py --episodes 2 --no-render`
   - `train.py --episodes 2 --comparison-mode --no-render`
   - `train.py --episodes 2 --hidden-layers 64 --no-render`
   - `train.py --episodes 2 --hidden-layers 256,128,64 --no-render`
@@ -193,7 +249,6 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - `train.py --episodes 2 --device cuda`
   - `train.py --episodes 8 --fast-mode --fast-tail-episodes 5`
   - `train.py --episodes 8 --fast-mode --no-render`
-  - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --no-render`
   - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --device auto`
   - `train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --eval-tail-episodes 3`
   - `visualizer.py --checkpoint ... --metrics-log ...`
@@ -205,6 +260,13 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - actual parallel-mode throughput gains and GPU-usage improvements on real hardware
   - the rendered evaluation-tail replay flow after a parallel-mode session
   - resume behavior when the saved checkpoint trainer mode is `parallel`
+  - the new bottom-dock `Parallel envs` input in a real pygame session
+  - the new bottom-dock `Loss Trend` graph in a real pygame session
+  - the new post-run `Results [R]` tab in a real pygame session
+  - automatic post-run results-window opening after a fully headless `--no-render` session without relying on timeout-based inference
+  - replay buttons and `1/2/3` hotkeys from the new post-run results state
+  - queued trainer-mode switching during a real active run
+  - full-history results rendering and the saved `training_summary.png` image on a real completed run
   - the replay-unavailable reason text in the sidebar under:
     - default mode
     - `No Render`

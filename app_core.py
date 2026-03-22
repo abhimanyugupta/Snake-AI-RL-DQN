@@ -44,6 +44,7 @@ from tabular_agent import QLearningAgent
 DEFAULT_REWARD_CONFIG = {"food": 10.0, "death": -10.0, "step": 0.0}
 DEFAULT_TRAINER_MODE = "single"
 SUPPORTED_TRAINER_MODES = ("single", "parallel")
+SUMMARY_IMAGE_NAME = "training_summary.png"
 
 
 def parse_hidden_layers_arg(raw_value):
@@ -119,6 +120,9 @@ def hold_training_window_open(
     dashboard,
     recent_episode_replays=None,
     *,
+    base_view=None,
+    summary_image_path=None,
+    agent=None,
     trainer_mode="single",
     fast_mode_requested=False,
     fast_mode_effective=False,
@@ -128,6 +132,7 @@ def hold_training_window_open(
 ):
     pygame.event.clear()
     recent_episode_replays = list(recent_episode_replays or [])
+    base_results_view = copy.deepcopy(base_view or game.dashboard_data or {})
     recent_replays_panel = build_recent_replays_panel(
         dashboard,
         recent_episode_replays,
@@ -139,9 +144,19 @@ def hold_training_window_open(
         parallel_phase=parallel_phase,
         training_completed=True,
     )
+
+    summary_view = copy.deepcopy(base_results_view)
+    summary_view.pop("overlay_title", None)
+    summary_view.pop("overlay_subtitle", None)
+    summary_view.pop("overlay_buttons", None)
+    if summary_image_path:
+        game.set_dashboard_data(summary_view)
+        game.draw()
+        pygame.image.save(game.display, summary_image_path)
+
     game.set_dashboard_data(
         build_training_finished_view(
-            game.dashboard_data,
+            base_results_view,
             game,
             recent_episode_replays,
             recent_replays_panel=recent_replays_panel,
@@ -187,12 +202,12 @@ def hold_training_window_open(
                         break
 
         if replay_index is not None and 0 <= replay_index < len(recent_episode_replays):
-            play_episode_replay(game, recent_episode_replays[replay_index])
+            play_episode_replay(game, dashboard, agent, recent_episode_replays[replay_index])
             if game.quit_requested:
                 return
             game.set_dashboard_data(
                 build_training_finished_view(
-                    game.dashboard_data,
+                    base_results_view,
                     game,
                     recent_episode_replays,
                     recent_replays_panel=recent_replays_panel,
@@ -345,6 +360,8 @@ def save_checkpoint(
             "moving_avg": list(dashboard.deep_average_history),
             "best_scores": list(dashboard.deep_best_history),
             "episode_rewards": list(dashboard.deep_episode_rewards),
+            "losses": list(dashboard.deep_loss_history),
+            "loss_moving_avg": list(dashboard.deep_loss_average_history),
         },
         "metrics_log_path": metrics_log_path,
         "last_transition": dict(last_transition or {}),
@@ -357,7 +374,23 @@ def save_checkpoint(
     agent.save(checkpoint_path, extra_state=extra_state)
 
 
-def capture_replay_frame(game, frame_data):
+def default_summary_image_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), SUMMARY_IMAGE_NAME)
+
+
+def capture_replay_frame(
+    game,
+    *,
+    state,
+    action_info,
+    current_game_number,
+    episode_goal,
+    best_score,
+    context,
+    show_baseline=True,
+    overlay_title=None,
+    overlay_subtitle=None,
+):
     return {
         "snake": list(game.snake),
         "head": game.head,
@@ -365,7 +398,15 @@ def capture_replay_frame(game, frame_data):
         "direction": game.direction,
         "score": int(game.score),
         "frame_iteration": int(game.frame_iteration),
-        "dashboard_data": copy.deepcopy(frame_data),
+        "state": np.asarray(state, dtype=np.float32).tolist(),
+        "action_info": copy.deepcopy(action_info),
+        "current_game_number": int(current_game_number),
+        "episode_goal": int(max(current_game_number, episode_goal)),
+        "best_score": int(best_score),
+        "context": copy.deepcopy(context),
+        "show_baseline": bool(show_baseline),
+        "overlay_title": overlay_title,
+        "overlay_subtitle": overlay_subtitle,
     }
 
 
@@ -429,7 +470,7 @@ def build_recent_replays_panel(
     }
 
     trainer_mode = str(trainer_mode or DEFAULT_TRAINER_MODE).strip().lower()
-    replay_label = "evaluation tail" if trainer_mode == "parallel" else "fast-mode tail"
+    replay_label = "evaluation tail" if trainer_mode == "parallel" else "session tail"
 
     if training_completed and replays:
         panel["lines"] = [
@@ -441,73 +482,44 @@ def build_recent_replays_panel(
         return panel
 
     if trainer_mode == "parallel":
-        if dashboard.headless_toggle.value:
-            panel["lines"] = [
-                "Parallel-mode replay capture is disabled while No Render is on.",
-                "Turn off No Render [H] to render the final evaluation tail.",
-            ]
-            return panel
-
-        if not dashboard.keep_open_toggle.value:
-            panel["lines"] = [
-                "Replay controls stay visible only when Keep open is enabled.",
-                "Turn on Keep open [K] before training finishes.",
-            ]
-            return panel
-
         if training_completed:
             panel["lines"] = [
                 "No evaluation-tail replays were captured in this session.",
-                "The rendered evaluation tail must finish to appear here.",
+                "The final evaluation runs must finish to appear here.",
             ]
             return panel
 
         if parallel_phase == "eval":
             panel["lines"] = [
                 "Parallel training is complete.",
-                f"The final {max(1, int(eval_tail_episodes))} evaluation run(s) are being rendered and will appear here.",
+                f"The final {max(1, int(eval_tail_episodes))} evaluation run(s) are being captured now and will appear here.",
             ]
         else:
             panel["lines"] = [
-                "Parallel mode trains headlessly for speed, then renders a short evaluation tail.",
+                "Parallel mode trains headlessly for speed, then captures a short evaluation tail.",
                 f"The final {max(1, int(eval_tail_episodes))} evaluation run(s) become replayable here after training finishes.",
             ]
         if replays:
             panel["footer"] = f"Captured so far this session: {len(replays)}/3"
         return panel
 
-    if not (fast_mode_requested or fast_mode_effective):
-        panel["lines"] = [
-            "Replay capture is only available in Fast Mode.",
-            "Turn on Fast Mode [X] to keep the latest 3 animated tail runs.",
-        ]
-        return panel
-
-    if dashboard.headless_toggle.value:
-        panel["lines"] = [
-            "Replay capture is disabled while No Render is on.",
-            "Turn off No Render [H] to capture the animated tail runs.",
-        ]
-        return panel
-
-    if not dashboard.keep_open_toggle.value:
-        panel["lines"] = [
-            "Replay controls stay visible only when Keep open is enabled.",
-            "Turn on Keep open [K] before training finishes.",
-        ]
-        return panel
-
     if training_completed:
         panel["lines"] = [
-            "No animated tail replays were captured in this session.",
-            "Fast-mode tail episodes must finish rendered to appear here.",
+            "No session-tail replays were captured in this session.",
+            "The final runs must finish to appear here.",
         ]
         return panel
 
-    panel["lines"] = [
-        "Fast mode will keep the newest 3 animated tail runs in memory.",
-        f"The final {max(1, int(fast_tail_episodes))} episode(s) become replayable here after training finishes.",
-    ]
+    if fast_mode_requested or fast_mode_effective:
+        panel["lines"] = [
+            "Fast mode will keep the newest 3 completed tail runs in memory.",
+            f"The final {max(1, int(fast_tail_episodes))} episode(s) are still the detailed tail for this session.",
+        ]
+    else:
+        panel["lines"] = [
+            "The newest 3 completed runs from this session will appear here.",
+            "This still works when No Render is on because replay data is captured logically.",
+        ]
     if fast_mode_requested and fast_mode_requested != fast_mode_effective:
         panel["lines"].append("Fast mode is queued and will apply from the next episode.")
     if replays:
@@ -522,7 +534,7 @@ def build_training_finished_view(
     recent_replays_panel=None,
 ):
     final_view = dict(base_view or {})
-    final_view["view_mode"] = "overview"
+    final_view["view_mode"] = "results" if final_view.get("results_ready") else "overview"
     final_view["overlay_title"] = "Training finished"
     if recent_episode_replays:
         final_view["overlay_subtitle"] = (
@@ -537,7 +549,7 @@ def build_training_finished_view(
     return final_view
 
 
-def apply_replay_frame(game, frame):
+def apply_replay_frame(game, dashboard, agent, frame):
     game.snake = list(frame.get("snake", []))
     game.head = frame.get("head", game.head)
     game.food = frame.get("food", game.food)
@@ -545,7 +557,34 @@ def apply_replay_frame(game, frame):
     game.score = int(frame.get("score", game.score))
     game.frame_iteration = int(frame.get("frame_iteration", game.frame_iteration))
     game.snake_body_set = set(game.snake[1:])
-    game.set_dashboard_data(copy.deepcopy(frame.get("dashboard_data", {})))
+    stored_dashboard = frame.get("dashboard_data")
+    if stored_dashboard:
+        game.set_dashboard_data(copy.deepcopy(stored_dashboard))
+        return
+
+    stored_state = frame.get("state")
+    state = (
+        np.asarray(stored_state, dtype=np.float32)
+        if stored_state is not None
+        else agent.encode_state(game)
+    )
+    action_info = copy.deepcopy(frame.get("action_info") or agent.get_action_details(state, greedy=True))
+    context = copy.deepcopy(frame.get("context") or build_training_context("Replay", 0.0, agent.last_train_info, {"reward_text": "n/a"}))
+    frame_data = build_dashboard_frame(
+        game=game,
+        dashboard=dashboard,
+        agent=agent,
+        state=state,
+        action_info=action_info,
+        current_game_number=int(frame.get("current_game_number", 1)),
+        episode_goal=int(frame.get("episode_goal", 1)),
+        best_score=int(frame.get("best_score", game.score)),
+        context=context,
+        show_baseline=bool(frame.get("show_baseline", dashboard.baseline_visible)),
+        overlay_title=frame.get("overlay_title"),
+        overlay_subtitle=frame.get("overlay_subtitle"),
+    )
+    game.set_dashboard_data(frame_data)
 
 
 def copy_env_state_to_game(game, env):
@@ -558,7 +597,7 @@ def copy_env_state_to_game(game, env):
     game.snake_body_set = set(env.snake_body_set)
 
 
-def play_episode_replay(game, episode_replay):
+def play_episode_replay(game, dashboard, agent, episode_replay):
     frames = list(episode_replay.get("frames", []))
     if not frames or game.quit_requested:
         return
@@ -583,7 +622,7 @@ def play_episode_replay(game, episode_replay):
         if game.quit_requested:
             return
 
-        apply_replay_frame(game, frame)
+        apply_replay_frame(game, dashboard, agent, frame)
         game.draw()
         pygame.time.delay(55)
 
@@ -703,12 +742,204 @@ def draw_dashboard_frame(
     game.draw()
 
 
+def copy_game_state_to_game(target_game, source_game):
+    target_game.snake = list(source_game.snake)
+    target_game.head = source_game.head
+    target_game.food = source_game.food
+    target_game.direction = source_game.direction
+    target_game.score = int(source_game.score)
+    target_game.frame_iteration = int(source_game.frame_iteration)
+    target_game.snake_body_set = set(source_game.snake_body_set)
+
+
+def clone_dashboard_state(target_dashboard, source_dashboard):
+    target_dashboard.load_deep_history(source_dashboard.export_deep_history())
+    target_dashboard.set_baseline_visibility(source_dashboard.baseline_visible)
+    if source_dashboard.baseline_scores:
+        target_dashboard.set_baseline_history(source_dashboard.export_baseline_history())
+    target_dashboard.show_arrows_toggle.value = source_dashboard.show_arrows_toggle.value
+    target_dashboard.show_dangers_toggle.value = source_dashboard.show_dangers_toggle.value
+    target_dashboard.show_graph_toggle.value = source_dashboard.show_graph_toggle.value
+    target_dashboard.turbo_toggle.value = source_dashboard.turbo_toggle.value
+    target_dashboard.show_scores_toggle.value = source_dashboard.show_scores_toggle.value
+    target_dashboard.show_avg_toggle.value = source_dashboard.show_avg_toggle.value
+    target_dashboard.show_best_toggle.value = source_dashboard.show_best_toggle.value
+    target_dashboard.selected_device_preference = source_dashboard.selected_device_preference
+    target_dashboard.selected_trainer_mode = source_dashboard.selected_trainer_mode
+    target_dashboard.fast_mode_toggle.value = source_dashboard.fast_mode_toggle.value
+    target_dashboard.episode_input.text = source_dashboard.episode_input.text
+    target_dashboard.parallel_env_input.text = source_dashboard.parallel_env_input.text
+    target_dashboard.graph_view_end = source_dashboard.graph_view_end
+    target_dashboard.graph_view_size = source_dashboard.graph_view_size
+    target_dashboard.pending_trainer_mode = None
+
+
+def build_post_run_base_view(
+    *,
+    game,
+    dashboard,
+    agent,
+    best_score,
+    last_transition,
+    session_perf,
+    trainer_mode,
+    parallel_envs,
+    eval_tail_episodes,
+    fast_tail_episodes,
+):
+    dashboard.set_results_ready(True, auto_focus=True)
+    state = agent.encode_state(game)
+    action_info = agent.get_action_details(state, greedy=True)
+    context = build_training_context(
+        "Training finished",
+        0.0,
+        build_live_train_info(
+            agent.last_train_info,
+            session_perf,
+            agent.last_train_info.get("episode_steps", 0),
+        ),
+        last_transition,
+        trainer_mode=trainer_mode,
+        parallel_envs=parallel_envs,
+        parallel_phase="eval" if trainer_mode == "parallel" else "single",
+        eval_tail_episodes=eval_tail_episodes,
+        fast_mode_requested=bool(dashboard.fast_mode_toggle.value),
+        fast_mode_effective=bool(dashboard.fast_mode_toggle.value and trainer_mode == "single"),
+        fast_tail_episodes=fast_tail_episodes,
+        episodes_remaining=0,
+    )
+    return build_dashboard_frame(
+        game=game,
+        dashboard=dashboard,
+        agent=agent,
+        state=state,
+        action_info=action_info,
+        current_game_number=max(1, len(dashboard.deep_scores)),
+        episode_goal=max(1, dashboard.get_episode_goal()),
+        best_score=best_score,
+        context=context,
+        show_baseline=dashboard.baseline_visible,
+    )
+
+
+def create_post_run_results_window(
+    *,
+    source_game,
+    source_dashboard,
+    agent,
+    trainer_mode,
+    parallel_envs,
+):
+    results_game = SnakeGameAI(
+        w=source_game.board_w,
+        h=source_game.board_h,
+        window_h=max(source_game.logical_h, 880),
+        render=True,
+        speed=max(10, int(source_game.speed or 10)),
+    )
+    results_dashboard = TrainingDashboard(
+        results_game,
+        initial_speed=max(10, int(source_game.speed or 10)),
+        initial_delay_ms=0,
+        initial_episode_goal=max(1, source_dashboard.get_episode_goal()),
+        initial_reward_config=source_dashboard.reward_config,
+        initial_headless=False,
+        initial_device_preference=agent.device.type,
+        cuda_available=cuda_is_available(),
+        require_manual_start=False,
+        initial_fast_mode=source_dashboard.fast_mode_toggle.value,
+        initial_trainer_mode=trainer_mode,
+        initial_parallel_envs=parallel_envs,
+    )
+    clone_dashboard_state(results_dashboard, source_dashboard)
+    return results_game, results_dashboard
+
+
+def show_post_run_results(
+    *,
+    game,
+    dashboard,
+    agent,
+    recent_episode_replays,
+    best_score,
+    last_transition,
+    session_perf,
+    trainer_mode,
+    parallel_envs,
+    eval_tail_episodes,
+    fast_tail_episodes,
+):
+    owns_window = not game.render
+    results_game = game
+    results_dashboard = dashboard
+    if owns_window:
+        results_game, results_dashboard = create_post_run_results_window(
+            source_game=game,
+            source_dashboard=dashboard,
+            agent=agent,
+            trainer_mode=trainer_mode,
+            parallel_envs=parallel_envs,
+        )
+
+    if recent_episode_replays and recent_episode_replays[-1].get("frames"):
+        last_frame = recent_episode_replays[-1]["frames"][-1]
+        results_game.snake = list(last_frame.get("snake", results_game.snake))
+        results_game.head = last_frame.get("head", results_game.head)
+        results_game.food = last_frame.get("food", results_game.food)
+        results_game.direction = last_frame.get("direction", results_game.direction)
+        results_game.score = int(last_frame.get("score", results_game.score))
+        results_game.frame_iteration = int(
+            last_frame.get("frame_iteration", results_game.frame_iteration)
+        )
+        results_game.snake_body_set = set(results_game.snake[1:])
+    else:
+        copy_game_state_to_game(results_game, game)
+
+    base_view = build_post_run_base_view(
+        game=results_game,
+        dashboard=results_dashboard,
+        agent=agent,
+        best_score=best_score,
+        last_transition=last_transition,
+        session_perf=session_perf,
+        trainer_mode=trainer_mode,
+        parallel_envs=parallel_envs,
+        eval_tail_episodes=eval_tail_episodes,
+        fast_tail_episodes=fast_tail_episodes,
+    )
+    hold_training_window_open(
+        results_game,
+        results_dashboard,
+        recent_episode_replays,
+        base_view=base_view,
+        summary_image_path=default_summary_image_path(),
+        agent=agent,
+        trainer_mode=trainer_mode,
+        fast_mode_requested=bool(results_dashboard.fast_mode_toggle.value),
+        fast_mode_effective=bool(results_dashboard.fast_mode_toggle.value and trainer_mode == "single"),
+        fast_tail_episodes=fast_tail_episodes,
+        eval_tail_episodes=eval_tail_episodes,
+        parallel_phase="eval" if trainer_mode == "parallel" else "single",
+    )
+    if owns_window:
+        results_game.close()
+
+
 def sync_agent_device_from_dashboard(agent, dashboard, session_label):
     if dashboard.selected_device_preference != agent.device_preference:
         if agent.set_device(dashboard.selected_device_preference):
             print(f"Switched {session_label} device to {agent.device_label} ({agent.device})")
             return True
     return False
+
+
+def apply_pending_trainer_mode_switch(agent, dashboard):
+    next_mode = dashboard.consume_pending_trainer_mode()
+    if not next_mode:
+        return None
+    configure_agent_for_mode(agent, next_mode)
+    print(f"Queued trainer-mode switch applied: {next_mode}")
+    return next_mode
 
 
 def ensure_baseline_history(
@@ -853,13 +1084,19 @@ def await_training_start(
             bool(comparison_mode and selected_mode == "single" and not preview_fast_mode)
         )
         preview_action = agent.get_action_details(preview_state, greedy=True)
+        if selected_mode == "parallel":
+            preview_mode_label = "Ready: parallel trainer"
+        elif preview_fast_mode:
+            preview_mode_label = "Ready: fast mode"
+        else:
+            preview_mode_label = "Ready: single trainer"
         preview_context = build_training_context(
-            "Ready to start",
+            preview_mode_label,
             0.0,
             build_live_train_info(agent.last_train_info, session_perf, 0),
             last_transition,
             trainer_mode=selected_mode,
-            parallel_envs=parallel_envs,
+            parallel_envs=dashboard.get_parallel_env_count(),
             parallel_phase="prestart" if selected_mode == "parallel" else "single",
             eval_tail_episodes=eval_tail_episodes,
             fast_mode_requested=preview_fast_mode,
@@ -868,9 +1105,13 @@ def await_training_start(
             episodes_remaining=dashboard.get_episode_goal(),
         )
         overlay_subtitle = (
-            "Choose device and trainer mode, then click Start [Enter] to begin."
+            f"Parallel mode will batch {dashboard.get_parallel_env_count()} headless envs after you press Start [Enter]."
             if selected_mode == "parallel"
-            else "Click Start [Enter] to begin training."
+            else (
+                f"Fast mode is armed. Press Start [Enter] to strip early episodes and animate the final {fast_tail_episodes}."
+                if preview_fast_mode
+                else "Click Start [Enter] to begin training."
+            )
         )
         draw_dashboard_frame(
             game=game,
@@ -940,8 +1181,8 @@ def train_parallel_mode(
     def completed_in_session():
         return max(0, agent.n_games - session_start_games)
 
-    def should_render_eval_tail():
-        return bool(game.render and not dashboard.headless_toggle.value)
+    def should_run_eval_tail():
+        return True
 
     def current_recent_replays_panel(*, training_completed=False, parallel_phase="bulk"):
         return build_recent_replays_panel(
@@ -999,8 +1240,7 @@ def train_parallel_mode(
 
     while not game.quit_requested:
         current_goal = dashboard.get_episode_goal()
-        render_eval_tail = should_render_eval_tail()
-        eval_count = min(eval_tail_episodes, current_goal) if render_eval_tail else 0
+        eval_count = min(eval_tail_episodes, current_goal) if should_run_eval_tail() else 0
         bulk_target = max(0, current_goal - eval_count)
         if completed_in_session() >= bulk_target:
             break
@@ -1116,7 +1356,11 @@ def train_parallel_mode(
             current_run_number = completed_in_session() + 1
             agent.n_games += 1
             agent.decay_epsilon()
-            dashboard.record_deep_episode(record["score"], record["episode_reward"])
+            dashboard.record_deep_episode(
+                record["score"],
+                record["episode_reward"],
+                loss=agent.last_train_info.get("loss"),
+            )
             best_score = max(best_score, record["score"])
             moving_avg = dashboard.deep_average_history[-1]
             last_transition = {
@@ -1146,8 +1390,7 @@ def train_parallel_mode(
             completed_since_print += 1
 
             current_goal = dashboard.get_episode_goal()
-            render_eval_tail = should_render_eval_tail()
-            eval_count = min(eval_tail_episodes, current_goal) if render_eval_tail else 0
+            eval_count = min(eval_tail_episodes, current_goal) if should_run_eval_tail() else 0
             bulk_target = max(0, current_goal - eval_count)
             if completed_in_session() < bulk_target:
                 env = envs[record["env_index"]]
@@ -1207,13 +1450,18 @@ def train_parallel_mode(
             if dashboard.current_delay_ms > 0 and not dashboard.turbo_toggle.value:
                 pygame.time.delay(min(30, dashboard.current_delay_ms))
 
+        switched_mode = apply_pending_trainer_mode_switch(agent, dashboard)
+        if switched_mode:
+            flush_metric_buffer(metrics_log_path, pending_metric_entries)
+            return best_score, last_transition, False, switched_mode
+
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
 
     if game.quit_requested:
-        return best_score, last_transition, False
+        return best_score, last_transition, False, "parallel"
 
     remaining_goal = max(0, dashboard.get_episode_goal() - completed_in_session())
-    eval_runs = min(eval_tail_episodes, remaining_goal) if should_render_eval_tail() else 0
+    eval_runs = min(eval_tail_episodes, remaining_goal) if should_run_eval_tail() else 0
     for _ in range(eval_runs):
         if game.quit_requested:
             break
@@ -1225,7 +1473,7 @@ def train_parallel_mode(
         episode_reward = 0.0
         step_count = 0
         episode_replay_frames = []
-        capture_replay = bool(game.render and not dashboard.headless_toggle.value)
+        capture_replay = True
 
         while not game.quit_requested:
             events = pygame.event.get() if game.render else []
@@ -1272,7 +1520,14 @@ def train_parallel_mode(
             action_info = agent.get_action_details(state, greedy=True)
             step_count += 1
             render_frame = bool(game.render and not dashboard.headless_toggle.value)
-            if render_frame:
+            replay_frame = None
+            replay_context = current_context(
+                "Parallel eval",
+                phase="eval",
+                episode_reward=episode_reward,
+                episode_steps_value=step_count,
+            )
+            if render_frame or capture_replay:
                 frame_data = build_dashboard_frame(
                     game=game,
                     dashboard=dashboard,
@@ -1282,23 +1537,29 @@ def train_parallel_mode(
                     current_game_number=current_game_number,
                     episode_goal=dashboard.get_episode_goal(),
                     best_score=best_score,
-                    context=current_context(
-                        "Parallel eval",
-                        phase="eval",
-                        episode_reward=episode_reward,
-                        episode_steps_value=step_count,
-                    ),
+                    context=replay_context,
                     lightweight=False,
                     show_baseline=False,
                     recent_replays_panel=current_recent_replays_panel(parallel_phase="eval"),
                 )
-                game.set_dashboard_data(frame_data)
                 if capture_replay:
-                    episode_replay_frames.append(capture_replay_frame(game, frame_data))
-                if dashboard.should_draw_frame(step_count, force=True):
-                    game.draw()
-                    if dashboard.current_delay_ms > 0:
-                        pygame.time.delay(dashboard.current_delay_ms)
+                    replay_frame = capture_replay_frame(
+                        game,
+                        state=state,
+                        action_info=action_info,
+                        current_game_number=current_game_number,
+                        episode_goal=dashboard.get_episode_goal(),
+                        best_score=best_score,
+                        context=replay_context,
+                        show_baseline=False,
+                    )
+                    episode_replay_frames.append(replay_frame)
+                if render_frame:
+                    game.set_dashboard_data(frame_data)
+                    if dashboard.should_draw_frame(step_count, force=True):
+                        game.draw()
+                        if dashboard.current_delay_ms > 0:
+                            pygame.time.delay(dashboard.current_delay_ms)
 
             reward, game_over, score = game.play_step(
                 action_info["action"],
@@ -1315,6 +1576,13 @@ def train_parallel_mode(
             }
 
             if render_frame and game_over:
+                final_context = current_context(
+                    "Parallel eval",
+                    phase="eval",
+                    episode_reward=episode_reward,
+                    episode_steps_value=step_count,
+                    transition_override=last_transition,
+                )
                 final_view = build_dashboard_frame(
                     game=game,
                     dashboard=dashboard,
@@ -1324,13 +1592,7 @@ def train_parallel_mode(
                     current_game_number=current_game_number,
                     episode_goal=dashboard.get_episode_goal(),
                     best_score=best_score,
-                    context=current_context(
-                        "Parallel eval",
-                        phase="eval",
-                        episode_reward=episode_reward,
-                        episode_steps_value=step_count,
-                        transition_override=last_transition,
-                    ),
+                    context=final_context,
                     lightweight=False,
                     show_baseline=False,
                     recent_replays_panel=current_recent_replays_panel(parallel_phase="eval"),
@@ -1339,9 +1601,44 @@ def train_parallel_mode(
                 final_view["overlay_subtitle"] = f"Score: {score}"
                 game.set_dashboard_data(final_view)
                 if capture_replay:
-                    episode_replay_frames.append(capture_replay_frame(game, final_view))
+                    episode_replay_frames.append(
+                        capture_replay_frame(
+                            game,
+                            state=state,
+                            action_info=action_info,
+                            current_game_number=current_game_number,
+                            episode_goal=dashboard.get_episode_goal(),
+                            best_score=best_score,
+                            context=final_context,
+                            show_baseline=False,
+                            overlay_title="Evaluation run finished",
+                            overlay_subtitle=f"Score: {score}",
+                        )
+                    )
                 game.draw()
                 pygame.time.delay(120 if dashboard.turbo_toggle.value else max(140, dashboard.current_delay_ms))
+            elif game_over and capture_replay:
+                final_context = current_context(
+                    "Parallel eval",
+                    phase="eval",
+                    episode_reward=episode_reward,
+                    episode_steps_value=step_count,
+                    transition_override=last_transition,
+                )
+                episode_replay_frames.append(
+                    capture_replay_frame(
+                        game,
+                        state=state,
+                        action_info=action_info,
+                        current_game_number=current_game_number,
+                        episode_goal=dashboard.get_episode_goal(),
+                        best_score=best_score,
+                        context=final_context,
+                        show_baseline=False,
+                        overlay_title="Evaluation run finished",
+                        overlay_subtitle=f"Score: {score}",
+                    )
+                )
 
             if game_over:
                 break
@@ -1350,7 +1647,11 @@ def train_parallel_mode(
             break
 
         agent.n_games += 1
-        dashboard.record_deep_episode(score, episode_reward)
+        dashboard.record_deep_episode(
+            score,
+            episode_reward,
+            loss=agent.last_train_info.get("loss"),
+        )
         best_score = max(best_score, score)
         if capture_replay and episode_replay_frames:
             recent_episode_replays.append(
@@ -1396,8 +1697,13 @@ def train_parallel_mode(
             f"Mode: parallel-eval"
         )
 
+        switched_mode = apply_pending_trainer_mode_switch(agent, dashboard)
+        if switched_mode:
+            flush_metric_buffer(metrics_log_path, pending_metric_entries)
+            return best_score, last_transition, False, switched_mode
+
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
-    return best_score, last_transition, not game.quit_requested
+    return best_score, last_transition, not game.quit_requested, "parallel"
 
 
 def train_session(
@@ -1464,6 +1770,7 @@ def train_session(
         require_manual_start=render,
         initial_fast_mode=fast_mode,
         initial_trainer_mode=resolved_trainer_mode,
+        initial_parallel_envs=resolved_parallel_envs,
     )
     dashboard.load_deep_history(deep_history)
     dashboard.set_baseline_visibility(
@@ -1502,29 +1809,43 @@ def train_session(
             training_completed = False
         else:
             dashboard.selected_trainer_mode = active_trainer_mode
+            resolved_parallel_envs = dashboard.get_parallel_env_count()
             configure_agent_for_mode(agent, active_trainer_mode)
 
-        if active_trainer_mode == "parallel" and not game.quit_requested:
-            best_score, last_transition, training_completed = train_parallel_mode(
-                agent=agent,
-                game=game,
-                dashboard=dashboard,
-                checkpoint_path=checkpoint_path,
-                metrics_log_path=metrics_log_path,
-                checkpoint_every=checkpoint_every,
-                session_start_games=session_start_games,
-                best_score=best_score,
-                last_transition=last_transition,
-                recent_episode_replays=recent_episode_replays,
-                session_perf=session_perf,
-                parallel_envs=resolved_parallel_envs,
-                eval_tail_episodes=resolved_eval_tail_episodes,
-            )
-        while active_trainer_mode == "single" and not game.quit_requested:
+        while not game.quit_requested:
             current_goal = dashboard.get_episode_goal()
             completed_in_session = agent.n_games - session_start_games
             if completed_in_session >= current_goal:
+                training_completed = True
                 break
+
+            if active_trainer_mode == "parallel":
+                best_score, last_transition, phase_completed, next_mode = train_parallel_mode(
+                    agent=agent,
+                    game=game,
+                    dashboard=dashboard,
+                    checkpoint_path=checkpoint_path,
+                    metrics_log_path=metrics_log_path,
+                    checkpoint_every=checkpoint_every,
+                    session_start_games=session_start_games,
+                    best_score=best_score,
+                    last_transition=last_transition,
+                    recent_episode_replays=recent_episode_replays,
+                    session_perf=session_perf,
+                    parallel_envs=resolved_parallel_envs,
+                    eval_tail_episodes=resolved_eval_tail_episodes,
+                )
+                if game.quit_requested:
+                    training_completed = False
+                    break
+                if phase_completed:
+                    training_completed = True
+                    break
+                active_trainer_mode = next_mode
+                dashboard.selected_trainer_mode = next_mode
+                if next_mode == "parallel":
+                    resolved_parallel_envs = dashboard.get_parallel_env_count()
+                continue
 
             episode_fast_mode = bool(dashboard.fast_mode_toggle.value)
             baseline_history = ensure_baseline_history(
@@ -1547,18 +1868,14 @@ def train_session(
                 )
             )
             animated_tail_episode = bool(episode_fast_mode and not stripped_episode)
+            replay_capture_episode = episodes_remaining <= 3
 
             game.reset()
             state = agent.encode_state(game)
             step_count = 0
             episode_reward = 0.0
             episode_replay_frames = []
-            capture_episode_replay = bool(
-                episode_fast_mode
-                and render
-                and not dashboard.headless_toggle.value
-                and animated_tail_episode
-            )
+            capture_episode_replay = bool(replay_capture_episode)
 
             def current_recent_replays_panel(training_completed=False):
                 return build_recent_replays_panel(
@@ -1696,8 +2013,11 @@ def train_session(
                 live_render_enabled = (
                     render and not dashboard.headless_toggle.value and not stripped_episode
                 )
+                live_context = current_context(
+                    "Fast tail" if animated_tail_episode else "Training"
+                )
 
-                if live_render_enabled:
+                if live_render_enabled or capture_episode_replay:
                     frame_data = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
@@ -1707,20 +2027,30 @@ def train_session(
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=current_context(
-                            "Fast tail" if animated_tail_episode else "Training"
-                        ),
+                        context=live_context,
                         lightweight=False,
                         show_baseline=episode_show_baseline,
                         recent_replays_panel=current_recent_replays_panel(),
                     )
-                    game.set_dashboard_data(frame_data)
                     if capture_episode_replay:
-                        episode_replay_frames.append(capture_replay_frame(game, frame_data))
-                    if dashboard.should_draw_frame(step_count):
-                        game.draw()
-                        if dashboard.current_delay_ms > 0:
-                            pygame.time.delay(dashboard.current_delay_ms)
+                        episode_replay_frames.append(
+                            capture_replay_frame(
+                                game,
+                                state=state,
+                                action_info=action_info,
+                                current_game_number=current_game_number,
+                                episode_goal=episode_goal,
+                                best_score=best_score,
+                                context=live_context,
+                                show_baseline=episode_show_baseline,
+                            )
+                        )
+                    if live_render_enabled:
+                        game.set_dashboard_data(frame_data)
+                        if dashboard.should_draw_frame(step_count):
+                            game.draw()
+                            if dashboard.current_delay_ms > 0:
+                                pygame.time.delay(dashboard.current_delay_ms)
 
                 reward, game_over, score = game.play_step(
                     action_info["action"],
@@ -1752,6 +2082,10 @@ def train_session(
                 }
 
                 if render and game_over and not dashboard.headless_toggle.value and not stripped_episode:
+                    final_context = current_context(
+                        "Fast tail" if animated_tail_episode else "Training",
+                        train_info_override=train_info,
+                    )
                     final_view = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
@@ -1761,10 +2095,7 @@ def train_session(
                         current_game_number=current_game_number,
                         episode_goal=episode_goal,
                         best_score=best_score,
-                        context=current_context(
-                            "Fast tail" if animated_tail_episode else "Training",
-                            train_info_override=train_info,
-                        ),
+                        context=final_context,
                         lightweight=False,
                         show_baseline=episode_show_baseline,
                         recent_replays_panel=current_recent_replays_panel(),
@@ -1773,10 +2104,42 @@ def train_session(
                     final_view["overlay_subtitle"] = f"Reward: {reward:+.2f}"
                     game.set_dashboard_data(final_view)
                     if capture_episode_replay:
-                        episode_replay_frames.append(capture_replay_frame(game, final_view))
+                        episode_replay_frames.append(
+                            capture_replay_frame(
+                                game,
+                                state=state,
+                                action_info=action_info,
+                                current_game_number=current_game_number,
+                                episode_goal=episode_goal,
+                                best_score=best_score,
+                                context=final_context,
+                                show_baseline=episode_show_baseline,
+                                overlay_title="Episode finished",
+                                overlay_subtitle=f"Reward: {reward:+.2f}",
+                            )
+                        )
                     game.draw()
                     pygame.time.delay(
                         120 if dashboard.turbo_toggle.value else max(140, dashboard.current_delay_ms)
+                    )
+                elif game_over and capture_episode_replay:
+                    final_context = current_context(
+                        "Fast tail" if animated_tail_episode else "Training",
+                        train_info_override=train_info,
+                    )
+                    episode_replay_frames.append(
+                        capture_replay_frame(
+                            game,
+                            state=state,
+                            action_info=action_info,
+                            current_game_number=current_game_number,
+                            episode_goal=episode_goal,
+                            best_score=best_score,
+                            context=final_context,
+                            show_baseline=episode_show_baseline,
+                            overlay_title="Episode finished",
+                            overlay_subtitle=f"Reward: {reward:+.2f}",
+                        )
                     )
 
                 if game.quit_requested or game_over:
@@ -1788,7 +2151,11 @@ def train_session(
 
             agent.n_games += 1
             agent.decay_epsilon()
-            dashboard.record_deep_episode(score, episode_reward)
+            dashboard.record_deep_episode(
+                score,
+                episode_reward,
+                loss=agent.last_train_info.get("loss"),
+            )
             best_score = max(best_score, score)
             if capture_episode_replay and episode_replay_frames:
                 recent_episode_replays.append(
@@ -1863,9 +2230,15 @@ def train_session(
                 f"Loss: {agent.last_train_info.get('loss')} | "
                 f"Mode: {'fast' if episode_fast_mode else 'default'}"
             )
+            switched_mode = apply_pending_trainer_mode_switch(agent, dashboard)
+            if switched_mode:
+                active_trainer_mode = switched_mode
+                if switched_mode == "parallel":
+                    resolved_parallel_envs = dashboard.get_parallel_env_count()
+                continue
 
-        if active_trainer_mode == "single":
-            training_completed = not game.quit_requested
+        if active_trainer_mode == "single" and not game.quit_requested:
+            training_completed = True
     finally:
         save_checkpoint(
             agent,
@@ -1877,19 +2250,19 @@ def train_session(
             parallel_envs=resolved_parallel_envs,
             eval_tail_episodes=resolved_eval_tail_episodes,
         )
-        if render and training_completed and dashboard.keep_open_toggle.value:
-            hold_training_window_open(
-                game,
-                dashboard,
-                recent_episode_replays,
+        if training_completed and not game.quit_requested:
+            show_post_run_results(
+                game=game,
+                dashboard=dashboard,
+                agent=agent,
+                recent_episode_replays=recent_episode_replays,
+                best_score=best_score,
+                last_transition=last_transition,
+                session_perf=session_perf,
                 trainer_mode=active_trainer_mode,
-                fast_mode_requested=bool(dashboard.fast_mode_toggle.value),
-                fast_mode_effective=bool(
-                    dashboard.fast_mode_toggle.value and active_trainer_mode == "single"
-                ),
-                fast_tail_episodes=fast_tail_episodes,
+                parallel_envs=resolved_parallel_envs,
                 eval_tail_episodes=resolved_eval_tail_episodes,
-                parallel_phase="eval" if active_trainer_mode == "parallel" else "single",
+                fast_tail_episodes=fast_tail_episodes,
             )
         game.close()
 
@@ -1925,6 +2298,10 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
         initial_trainer_mode=checkpoint_state.get("trainer_config", {}).get(
             "mode",
             DEFAULT_TRAINER_MODE,
+        ),
+        initial_parallel_envs=checkpoint_state.get("trainer_config", {}).get(
+            "parallel_envs",
+            8,
         ),
     )
     dashboard.load_deep_history(deep_history)
