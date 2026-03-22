@@ -25,6 +25,7 @@ from snake_game import Direction, Point
 
 DEFAULT_HIDDEN_LAYERS = [128, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
+SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
 
 
 def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
@@ -37,6 +38,30 @@ def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
     if any(value <= 0 for value in normalized):
         raise ValueError("Hidden-layer sizes must be positive integers.")
     return normalized
+
+
+def normalize_device_preference(device_preference: str | None) -> str:
+    normalized = (device_preference or "auto").strip().lower()
+    if normalized not in SUPPORTED_DEVICE_CHOICES:
+        raise ValueError(
+            "Device must be one of: auto, cpu, cuda."
+        )
+    return normalized
+
+
+def resolve_torch_device(device_preference: str | None) -> torch.device:
+    normalized = normalize_device_preference(device_preference)
+    if normalized == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if normalized == "cuda" and not torch.cuda.is_available():
+        raise ValueError(
+            "CUDA was requested, but torch.cuda.is_available() is False on this machine."
+        )
+    return torch.device(normalized)
+
+
+def cuda_is_available() -> bool:
+    return bool(torch.cuda.is_available())
 
 
 def extract_hidden_layers_from_checkpoint(checkpoint: dict) -> List[int]:
@@ -183,8 +208,10 @@ class DQNAgent:
         warmup_size: int = 1_000,
         target_sync_interval: int = 250,
         hidden_layers: Iterable[int] | None = None,
+        device_preference: str = "auto",
     ):
-        self.device = torch.device("cpu")
+        self.device_preference = normalize_device_preference(device_preference)
+        self.device = resolve_torch_device(self.device_preference)
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon = epsilon
@@ -228,7 +255,7 @@ class DQNAgent:
 
     @property
     def device_label(self) -> str:
-        return "CPU"
+        return "CUDA" if self.device.type == "cuda" else "CPU"
 
     @property
     def architecture_label(self) -> str:
@@ -239,6 +266,22 @@ class DQNAgent:
 
     def get_action(self, state: np.ndarray) -> List[int]:
         return self.get_action_details(state)["action"]
+
+    def set_device(self, device_preference: str) -> bool:
+        normalized = normalize_device_preference(device_preference)
+        new_device = resolve_torch_device(normalized)
+        changed = new_device.type != self.device.type
+
+        self.device_preference = normalized
+        if not changed:
+            return False
+
+        self.device = new_device
+        self.policy_net.to(self.device)
+        self.target_net.to(self.device)
+        self.loss_fn.to(self.device)
+        self._move_optimizer_state_to_device()
+        return True
 
     def get_action_details(self, state: np.ndarray, greedy: bool = False) -> dict:
         q_values = self.get_q_values(state)
@@ -555,6 +598,10 @@ class DQNAgent:
                 "input_size": len(self.STATE_LABELS),
                 "output_size": len(self.ACTION_LABELS),
             },
+            "runtime_config": {
+                "device_preference": self.device_preference,
+                "device_label": self.device_label,
+            },
             "extra_state": extra_state or {},
         }
         torch.save(checkpoint, path)
@@ -571,6 +618,7 @@ class DQNAgent:
         self.policy_net.load_state_dict(checkpoint["policy_state_dict"])
         self.target_net.load_state_dict(checkpoint["target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self._move_optimizer_state_to_device()
         self.epsilon = float(checkpoint.get("epsilon", self.epsilon))
         self.n_games = int(checkpoint.get("n_games", 0))
         self.train_steps = int(checkpoint.get("train_steps", 0))
@@ -780,6 +828,12 @@ class DQNAgent:
             "decision_type": decision_type,
             "q_values": list(q_values),
         }
+
+    def _move_optimizer_state_to_device(self) -> None:
+        for state in self.optimizer.state.values():
+            for key, value in list(state.items()):
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(self.device)
 
     def _free_space_ratio(
         self, game, start: Point, direction: Direction, max_travel: float

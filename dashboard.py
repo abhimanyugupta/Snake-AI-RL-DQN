@@ -160,10 +160,12 @@ class ButtonControl:
             return self.rect.collidepoint(event.pos)
         return False
 
-    def draw_data(self, active):
+    def draw_data(self, active=False, disabled=False, style="default", label=None):
         return {
-            "label": self.label,
+            "label": label or self.label,
             "active": active,
+            "disabled": disabled,
+            "style": style,
             "x": self.rect.x,
             "y": self.rect.y,
             "w": self.rect.width,
@@ -180,6 +182,9 @@ class TrainingDashboard:
         initial_episode_goal,
         initial_reward_config=None,
         initial_headless=False,
+        initial_device_preference="cpu",
+        cuda_available=False,
+        require_manual_start=False,
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -197,6 +202,14 @@ class TrainingDashboard:
 
         self.view_mode = "overview"
         self.view_order = ["overview", "network", "algorithm"]
+        self.cuda_available = bool(cuda_available)
+        self.selected_device_preference = (
+            "cuda"
+            if str(initial_device_preference).lower() == "cuda" and self.cuda_available
+            else "cpu"
+        )
+        self.require_manual_start = bool(require_manual_start)
+        self.started = not self.require_manual_start
         self.overview_button = ButtonControl("Overview [Tab]", col_x, padding + 44, 156, 30, "overview")
         self.network_button = ButtonControl("Network [N]", col_x + 168, padding + 44, 134, 30, "network")
         self.algorithm_button = ButtonControl("Algorithm [E]", col_x + 314, padding + 44, 144, 30, "algorithm")
@@ -251,6 +264,7 @@ class TrainingDashboard:
         y += 32
         self.show_graph_toggle = ToggleControl("Graph [G]", True, col_x, y, toggle_w, 26)
         self.pause_toggle = ToggleControl("Pause [Space]", False, col_x + toggle_w + 10, y, toggle_w, 26)
+        self.start_button = ButtonControl("Start [Enter]", col_x + toggle_w + 10, y, toggle_w, 26, "start")
         y += 32
         self.turbo_toggle = ToggleControl("Turbo [T]", False, col_x, y, toggle_w, 26)
         self.episode_input = TextInputControl(
@@ -266,6 +280,9 @@ class TrainingDashboard:
         y += 18
         self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 26)
         self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 26)
+        y += 32
+        self.cpu_device_button = ButtonControl("CPU [C]", col_x, y, toggle_w, 26, "device_cpu")
+        self.gpu_device_button = ButtonControl("GPU [U]", col_x + toggle_w + 10, y, toggle_w, 26, "device_cuda")
         y += 32
         self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 26)
         self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 26)
@@ -291,6 +308,11 @@ class TrainingDashboard:
             self.show_best_toggle,
         ]
         self.inputs = [self.episode_input]
+        self.control_buttons = [
+            self.start_button,
+            self.cpu_device_button,
+            self.gpu_device_button,
+        ]
 
         self.initial_episode_goal = initial_episode_goal
         self.last_reward = 0.0
@@ -421,13 +443,18 @@ class TrainingDashboard:
                 if event.type == pygame.KEYDOWN:
                     self._handle_shortcuts(event.key)
 
-                for slider in self.sliders:
-                    if slider.handle_event(event):
+                for control_button in self.control_buttons:
+                    if control_button.handle_event(event):
+                        self._handle_control_button(control_button.mode_value)
                         break
                 else:
-                    for toggle in self.toggles:
-                        if toggle.handle_event(event):
+                    for slider in self.sliders:
+                        if slider.handle_event(event):
                             break
+                    else:
+                        for toggle in self.toggles:
+                            if toggle.handle_event(event):
+                                break
 
     def _handle_graph_event(self, event):
         gr = self.graph_rect
@@ -490,7 +517,8 @@ class TrainingDashboard:
 
     def _handle_shortcuts(self, key):
         if key == pygame.K_SPACE:
-            self.pause_toggle.toggle()
+            if self.started:
+                self.pause_toggle.toggle()
         elif key == pygame.K_TAB:
             current_index = self.view_order.index(self.view_mode)
             self.view_mode = self.view_order[(current_index + 1) % len(self.view_order)]
@@ -498,6 +526,8 @@ class TrainingDashboard:
             self.view_mode = "network"
         elif key == pygame.K_e:
             self.view_mode = "algorithm"
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._handle_control_button("start")
         elif key == pygame.K_a:
             self.show_arrows_toggle.toggle()
         elif key == pygame.K_d:
@@ -510,6 +540,10 @@ class TrainingDashboard:
             self.keep_open_toggle.toggle()
         elif key == pygame.K_h:
             self.headless_toggle.toggle()
+        elif key == pygame.K_c:
+            self._handle_control_button("device_cpu")
+        elif key == pygame.K_u:
+            self._handle_control_button("device_cuda")
         elif key == pygame.K_s:
             self.show_scores_toggle.toggle()
         elif key == pygame.K_m:
@@ -533,6 +567,15 @@ class TrainingDashboard:
             if total > 0:
                 self.graph_view_size = total
                 self.graph_view_end = None
+
+    def _handle_control_button(self, mode_value):
+        if mode_value == "start":
+            self.started = True
+            self.pause_toggle.value = False
+        elif mode_value == "device_cpu":
+            self.selected_device_preference = "cpu"
+        elif mode_value == "device_cuda" and self.cuda_available:
+            self.selected_device_preference = "cuda"
 
     def build_dashboard_data(
         self,
@@ -568,6 +611,7 @@ class TrainingDashboard:
             "[accent]Overview: board on the left, current decision on the right, history below.",
             "[accent]Network: live forward pass across the configurable hidden layers.",
             "[accent]Algorithm: Bellman target, replay memory, and target-net update flow.",
+            f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
         ]
 
         best_q = max(q_values)
@@ -666,7 +710,12 @@ class TrainingDashboard:
                 self.death_reward_slider.draw_data(f"{self.death_reward_slider.value:+.1f}"),
                 self.step_reward_slider.draw_data(f"{self.step_reward_slider.value:+.2f}"),
             ],
-            "toggles": [toggle.draw_data() for toggle in self.toggles],
+            "control_buttons": self._build_control_buttons(),
+            "toggles": [
+                toggle.draw_data()
+                for toggle in self.toggles
+                if self.started or toggle is not self.pause_toggle
+            ],
             "inputs": [input_control.draw_data() for input_control in self.inputs],
             "show_arrows": self.show_arrows_toggle.value,
             "show_dangers": self.show_dangers_toggle.value,
@@ -765,6 +814,7 @@ class TrainingDashboard:
         min_y = self.speed_slider.track_rect.y - 30
         max_bottom = max(toggle.rect.bottom for toggle in self.toggles)
         max_bottom = max(max_bottom, max(input_control.rect.bottom for input_control in self.inputs))
+        max_bottom = max(max_bottom, max(button.rect.bottom for button in self.control_buttons))
         return {
             "x": min_x - 14,
             "y": min_y - 18,
@@ -779,8 +829,34 @@ class TrainingDashboard:
             {"title": "Pace", "x": base_x, "y": self.speed_slider.track_rect.y - 36},
             {"title": "Rewards", "x": base_x, "y": self.food_reward_slider.track_rect.y - 36},
             {"title": "Session", "x": base_x, "y": self.show_arrows_toggle.rect.y - 18},
-            {"title": "History", "x": base_x, "y": self.keep_open_toggle.rect.y - 18},
+            {"title": "Compute", "x": base_x, "y": self.cpu_device_button.rect.y - 18},
+            {"title": "History", "x": base_x, "y": self.show_scores_toggle.rect.y - 18},
         ]
+
+    def _build_control_buttons(self):
+        buttons = []
+        if not self.started:
+            buttons.append(
+                self.start_button.draw_data(
+                    active=True,
+                    style="start",
+                )
+            )
+
+        buttons.append(
+            self.cpu_device_button.draw_data(
+                active=self.selected_device_preference == "cpu",
+                style="device",
+            )
+        )
+        buttons.append(
+            self.gpu_device_button.draw_data(
+                active=self.selected_device_preference == "cuda",
+                disabled=not self.cuda_available,
+                style="device",
+            )
+        )
+        return buttons
 
     def _format_metric(self, value):
         if value is None:

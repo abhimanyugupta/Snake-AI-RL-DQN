@@ -48,9 +48,13 @@ Replay memory mixes old and new experiences together so training is more stable.
 If the same network creates both the prediction and the target, learning can become unstable.
 The target network is a slower-moving copy used to compute better training targets.
 
-## Why the first version is CPU only
+## How device choice works here
 
-This project is being built first as a clear learning tool.
-CPU-only training keeps setup simpler and reduces implementation noise while the dashboard and explainer are being built.
+This project still aims to be a clear learning tool, but it now supports both CPU and CUDA.
 
-GPU support can be added later after the training lab is stable.
+- `--device auto` uses CUDA when available, otherwise CPU
+- `--device cpu` forces CPU training
+- `--device cuda` forces GPU training and fails clearly if CUDA is unavailable
+
+The training logic is the same either way.
+The main difference is where the neural-network forward and backward passes run.

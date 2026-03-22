@@ -78,8 +78,6 @@ def hold_training_window_open(game, dashboard):
 
     while not game.quit_requested:
         events = pygame.event.get()
-        if hasattr(game, "scale_events"):
-            events = game.scale_events(events)
         game.handle_system_events(events)
 
         for event in events:
@@ -331,8 +329,6 @@ def train_session(
             while True:
                 episode_goal = dashboard.get_episode_goal()
                 events = pygame.event.get() if render else []
-                if hasattr(game, "scale_events"):
-                    events = game.scale_events(events)
                 dashboard.sync_graph_rect(game)
                 headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)
@@ -569,8 +565,6 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
 
             while not game.quit_requested:
                 events = pygame.event.get()
-                if hasattr(game, "scale_events"):
-                    events = game.scale_events(events)
                 dashboard.sync_graph_rect(game)
                 headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)
@@ -712,3 +706,76 @@ def main_visualizer():
         metrics_log_path=args.metrics_log,
         speed=args.speed,
     )
+    parser.add_argument("--checkpoint-path", default="dqn_checkpoint.pt", help="Checkpoint file path.")
+    parser.add_argument("--metrics-log", default="training_metrics.jsonl", help="JSONL metric log path.")
+    parser.add_argument("--resume", action="store_true", help="Resume from an existing checkpoint.")
+    parser.add_argument("--checkpoint-every", type=int, default=25, help="Save every N finished games.")
+    parser.add_argument("--no-render", action="store_true", help="Run without the pygame window.")
+    parser.add_argument("--comparison-mode", action="store_true", help="Overlay a local tabular baseline.")
+    parser.add_argument("--baseline-episodes", type=int, default=120, help="How many baseline episodes to precompute.")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Training device. auto uses CUDA when available, otherwise CPU.",
+    )
+    parser.add_argument(
+        "--hidden-layers",
+        type=parse_hidden_layers_arg,
+        default=None,
+        help="Comma-separated hidden-layer sizes, for example 64 or 128,128,64.",
+    )
+
+    args = parser.parse_args()
+    render = not args.no_render
+    speed = args.speed if render else 0
+    delay_ms = args.delay_ms if render else 0
+    hidden_layers = resolve_hidden_layers_for_session(
+        checkpoint_path=args.checkpoint_path,
+        resume=args.resume,
+        explicit_hidden_layers=args.hidden_layers,
+    )
+
+    try:
+        train_session(
+            episodes=args.episodes,
+            render=render,
+            speed=speed,
+            delay_ms=delay_ms,
+            checkpoint_path=args.checkpoint_path,
+            metrics_log_path=args.metrics_log,
+            resume=args.resume,
+            checkpoint_every=args.checkpoint_every,
+            comparison_mode=args.comparison_mode,
+            baseline_episodes=args.baseline_episodes,
+            hidden_layers=hidden_layers,
+            device_preference=args.device,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def main_visualizer():
+    parser = argparse.ArgumentParser(
+        description="View a saved Snake DQN checkpoint with the pygame dashboard."
+    )
+    parser.add_argument("--checkpoint", default="dqn_checkpoint.pt", help="Checkpoint file path.")
+    parser.add_argument("--metrics-log", default=None, help="Optional JSONL metric log path.")
+    parser.add_argument("--speed", type=int, default=16, help="Playback speed.")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Viewer device. auto uses CUDA when available, otherwise CPU.",
+    )
+    args = parser.parse_args()
+
+    try:
+        run_visualizer_session(
+            checkpoint_path=args.checkpoint,
+            metrics_log_path=args.metrics_log,
+            speed=args.speed,
+            device_preference=args.device,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc

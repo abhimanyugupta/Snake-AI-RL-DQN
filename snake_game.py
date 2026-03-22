@@ -1090,7 +1090,6 @@ class SnakeGameAI:
             rect = pygame.Rect(toggle["x"], toggle["y"], toggle["w"], toggle["h"])
             # Premium toggle buttons
             base_color = (65, 180, 100) if toggle["value"] else (50, 52, 60)
-            hover_color = (80, 200, 115) if toggle["value"] else (60, 62, 70)
             border_color = (45, 140, 75) if toggle["value"] else (40, 42, 48)
             
             pygame.draw.rect(self.display, base_color, rect, border_radius=6)
@@ -1099,6 +1098,36 @@ class SnakeGameAI:
             text_color = (255, 255, 255) if toggle["value"] else (180, 185, 195)
             label_surface = self.tiny_font.render(toggle["label"], True, text_color)
             # Center text in rect
+            text_rect = label_surface.get_rect(center=rect.center)
+            self.display.blit(label_surface, text_rect)
+
+        for button in data.get("control_buttons", []):
+            rect = pygame.Rect(button["x"], button["y"], button["w"], button["h"])
+            active = bool(button.get("active", False))
+            disabled = bool(button.get("disabled", False))
+            style = button.get("style", "default")
+
+            if disabled:
+                base_color = (44, 46, 52)
+                border_color = (58, 60, 68)
+                text_color = (120, 124, 132)
+            elif style == "start":
+                base_color = (75, 150, 230) if active else (48, 52, 60)
+                border_color = (110, 205, 255) if active else (60, 65, 75)
+                text_color = (255, 255, 255) if active else (190, 195, 205)
+            elif style == "device":
+                base_color = (74, 126, 192) if active else (50, 52, 60)
+                border_color = (112, 185, 255) if active else (40, 42, 48)
+                text_color = (255, 255, 255) if active else (180, 185, 195)
+            else:
+                base_color = (56, 60, 70) if active else (50, 52, 60)
+                border_color = (100, 210, 255) if active else (40, 42, 48)
+                text_color = (255, 255, 255) if active else (180, 185, 195)
+
+            pygame.draw.rect(self.display, base_color, rect, border_radius=6)
+            pygame.draw.rect(self.display, border_color, rect, width=2, border_radius=6)
+
+            label_surface = self.tiny_font.render(button["label"], True, text_color)
             text_rect = label_surface.get_rect(center=rect.center)
             self.display.blit(label_surface, text_rect)
 
