@@ -83,7 +83,16 @@ def parse_trainer_mode_arg(raw_value):
     return normalized
 
 
-def resolve_trainer_mode_for_session(checkpoint_extra_state, resume, explicit_trainer_mode):
+def default_trainer_mode_for_device(device_type):
+    return "parallel" if str(device_type).strip().lower() == "cuda" else DEFAULT_TRAINER_MODE
+
+
+def resolve_trainer_mode_for_session(
+    checkpoint_extra_state,
+    resume,
+    explicit_trainer_mode,
+    device_type=None,
+):
     if explicit_trainer_mode:
         return explicit_trainer_mode
     if resume:
@@ -91,7 +100,7 @@ def resolve_trainer_mode_for_session(checkpoint_extra_state, resume, explicit_tr
         restored_mode = str(trainer_config.get("mode", "")).strip().lower()
         if restored_mode in SUPPORTED_TRAINER_MODES:
             return restored_mode
-    return DEFAULT_TRAINER_MODE
+    return default_trainer_mode_for_device(device_type)
 
 
 def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_layers):
@@ -121,6 +130,7 @@ def hold_training_window_open(
     recent_episode_replays=None,
     *,
     base_view=None,
+    base_view_builder=None,
     summary_image_path=None,
     agent=None,
     trainer_mode="single",
@@ -132,7 +142,27 @@ def hold_training_window_open(
 ):
     pygame.event.clear()
     recent_episode_replays = list(recent_episode_replays or [])
-    base_results_view = copy.deepcopy(base_view or game.dashboard_data or {})
+
+    def build_base_results_view(view_mode=None):
+        if callable(base_view_builder):
+            original_view = dashboard.view_mode
+            if view_mode is not None:
+                dashboard.view_mode = view_mode
+            try:
+                return copy.deepcopy(base_view_builder())
+            finally:
+                dashboard.view_mode = original_view
+        if isinstance(base_view, dict):
+            frame = copy.deepcopy(base_view)
+            if view_mode is not None:
+                frame["view_mode"] = view_mode
+            return frame
+        frame = copy.deepcopy(game.dashboard_data or {})
+        if view_mode is not None:
+            frame["view_mode"] = view_mode
+        return frame
+
+    base_results_view = build_base_results_view("results")
     recent_replays_panel = build_recent_replays_panel(
         dashboard,
         recent_episode_replays,
@@ -154,14 +184,33 @@ def hold_training_window_open(
         game.draw()
         pygame.image.save(game.display, summary_image_path)
 
-    game.set_dashboard_data(
-        build_training_finished_view(
-            base_results_view,
-            game,
-            recent_episode_replays,
-            recent_replays_panel=recent_replays_panel,
-        )
-    )
+    def current_finished_view():
+        current_view = dashboard.view_mode
+        if current_view not in dashboard.available_view_order():
+            current_view = "results" if dashboard.results_ready else "overview"
+
+        frame = build_base_results_view(current_view)
+        frame["view_mode"] = current_view
+        frame["view_buttons"] = dashboard.visible_view_buttons()
+        frame["graph_view_end"] = dashboard.graph_view_end
+        frame["graph_view_size"] = dashboard.graph_view_size
+        frame["graph_hover_index"] = dashboard.graph_hover_index
+        frame["recent_replays"] = recent_replays_panel
+
+        if current_view == "results":
+            return build_training_finished_view(
+                frame,
+                game,
+                recent_episode_replays,
+                recent_replays_panel=recent_replays_panel,
+            )
+
+        frame.pop("overlay_title", None)
+        frame.pop("overlay_subtitle", None)
+        frame.pop("overlay_buttons", None)
+        return frame
+
+    game.set_dashboard_data(current_finished_view())
 
     while not game.quit_requested:
         events = pygame.event.get()
@@ -205,21 +254,12 @@ def hold_training_window_open(
             play_episode_replay(game, dashboard, agent, recent_episode_replays[replay_index])
             if game.quit_requested:
                 return
-            game.set_dashboard_data(
-                build_training_finished_view(
-                    base_results_view,
-                    game,
-                    recent_episode_replays,
-                    recent_replays_panel=recent_replays_panel,
-                )
-            )
+            game.set_dashboard_data(current_finished_view())
             continue
 
         dashboard.sync_graph_rect(game)
         dashboard.handle_events(scaled_events)
-        game.dashboard_data["graph_view_end"] = dashboard.graph_view_end
-        game.dashboard_data["graph_view_size"] = dashboard.graph_view_size
-        game.dashboard_data["graph_hover_index"] = dashboard.graph_hover_index
+        game.set_dashboard_data(current_finished_view())
         game.draw()
         pygame.time.delay(30)
 
@@ -315,10 +355,11 @@ def run_tabular_baseline(episodes, reward_config, metrics_log_path):
                     break
 
             agent.n_games += 1
-            agent.decay_epsilon()
             best_score = max(best_score, score)
             score_history.append(score)
             moving_avg = sum(score_history[-20:]) / len(score_history[-20:])
+            agent.decay_epsilon()
+            agent.record_episode_outcome(score, moving_avg)
             baseline_entries.append(
                 build_metric_entry(
                     algo="tabular",
@@ -512,13 +553,13 @@ def build_recent_replays_panel(
 
     if fast_mode_requested or fast_mode_effective:
         panel["lines"] = [
-            "Fast mode will keep the newest 3 completed tail runs in memory.",
-            f"The final {max(1, int(fast_tail_episodes))} episode(s) are still the detailed tail for this session.",
+            "Fast mode hides live single-snake rendering and keeps the newest 3 runs in memory.",
+            "Replay those runs after training finishes to inspect how the learned policy behaves.",
         ]
     else:
         panel["lines"] = [
             "The newest 3 completed runs from this session will appear here.",
-            "This still works when No Render is on because replay data is captured logically.",
+            "Use Single mode to watch one snake learn live, or Parallel mode to train for speed.",
         ]
     if fast_mode_requested and fast_mode_requested != fast_mode_effective:
         panel["lines"].append("Fast mode is queued and will apply from the next episode.")
@@ -786,8 +827,9 @@ def build_post_run_base_view(
     parallel_envs,
     eval_tail_episodes,
     fast_tail_episodes,
+    auto_focus_results=True,
 ):
-    dashboard.set_results_ready(True, auto_focus=True)
+    dashboard.set_results_ready(True, auto_focus=auto_focus_results)
     state = agent.encode_state(game)
     action_info = agent.get_action_details(state, greedy=True)
     context = build_training_context(
@@ -843,7 +885,6 @@ def create_post_run_results_window(
         initial_delay_ms=0,
         initial_episode_goal=max(1, source_dashboard.get_episode_goal()),
         initial_reward_config=source_dashboard.reward_config,
-        initial_headless=False,
         initial_device_preference=agent.device.type,
         cuda_available=cuda_is_available(),
         require_manual_start=False,
@@ -895,23 +936,28 @@ def show_post_run_results(
     else:
         copy_game_state_to_game(results_game, game)
 
-    base_view = build_post_run_base_view(
-        game=results_game,
-        dashboard=results_dashboard,
-        agent=agent,
-        best_score=best_score,
-        last_transition=last_transition,
-        session_perf=session_perf,
-        trainer_mode=trainer_mode,
-        parallel_envs=parallel_envs,
-        eval_tail_episodes=eval_tail_episodes,
-        fast_tail_episodes=fast_tail_episodes,
-    )
+    def rebuild_post_run_view(auto_focus_results=False):
+        return build_post_run_base_view(
+            game=results_game,
+            dashboard=results_dashboard,
+            agent=agent,
+            best_score=best_score,
+            last_transition=last_transition,
+            session_perf=session_perf,
+            trainer_mode=trainer_mode,
+            parallel_envs=parallel_envs,
+            eval_tail_episodes=eval_tail_episodes,
+            fast_tail_episodes=fast_tail_episodes,
+            auto_focus_results=auto_focus_results,
+        )
+
+    base_view = rebuild_post_run_view(auto_focus_results=True)
     hold_training_window_open(
         results_game,
         results_dashboard,
         recent_episode_replays,
         base_view=base_view,
+        base_view_builder=rebuild_post_run_view,
         summary_image_path=default_summary_image_path(),
         agent=agent,
         trainer_mode=trainer_mode,
@@ -980,7 +1026,7 @@ def resolve_parallel_batch_size(device_type):
 def resolve_parallel_env_count(device_type, requested_envs):
     if requested_envs is not None:
         return max(1, int(requested_envs))
-    return 16 if str(device_type) == "cuda" else 8
+    return 64 if str(device_type) == "cuda" else 16
 
 
 def configure_agent_for_mode(agent, trainer_mode):
@@ -1019,7 +1065,7 @@ def maybe_build_parallel_frame(
     last_frame_time,
     force=False,
 ):
-    if not render or dashboard.headless_toggle.value:
+    if not render:
         return False, last_frame_time
 
     now = time.perf_counter()
@@ -1075,21 +1121,17 @@ def await_training_start(
         else:
             configure_agent_for_mode(agent, selected_mode)
 
-        if dashboard.headless_toggle.value:
-            dashboard.started = True
-            break
-
         preview_fast_mode = bool(dashboard.fast_mode_toggle.value)
         dashboard.set_baseline_visibility(
             bool(comparison_mode and selected_mode == "single" and not preview_fast_mode)
         )
         preview_action = agent.get_action_details(preview_state, greedy=True)
         if selected_mode == "parallel":
-            preview_mode_label = "Ready: parallel trainer"
+            preview_mode_label = "Ready: speed mode"
         elif preview_fast_mode:
-            preview_mode_label = "Ready: fast mode"
+            preview_mode_label = "Ready: learn mode (fast)"
         else:
-            preview_mode_label = "Ready: single trainer"
+            preview_mode_label = "Ready: learn mode"
         preview_context = build_training_context(
             preview_mode_label,
             0.0,
@@ -1105,12 +1147,12 @@ def await_training_start(
             episodes_remaining=dashboard.get_episode_goal(),
         )
         overlay_subtitle = (
-            f"Parallel mode will batch {dashboard.get_parallel_env_count()} headless envs after you press Start [Enter]."
+            f"Parallel mode is the speed path: it will batch {dashboard.get_parallel_env_count()} environments and render only the evaluation tail."
             if selected_mode == "parallel"
             else (
-                f"Fast mode is armed. Press Start [Enter] to strip early episodes and animate the final {fast_tail_episodes}."
+                "Fast mode is armed. Press Start [Enter] to hide live training and replay the newest 3 runs afterward."
                 if preview_fast_mode
-                else "Click Start [Enter] to begin training."
+                else "Single mode is the learning path: press Start [Enter] to watch one snake train live."
             )
         )
         draw_dashboard_frame(
@@ -1271,9 +1313,11 @@ def train_parallel_mode(
             last_frame_time=last_frame_time,
             force=False,
         )
+        if scaled_events:
+            frame_due = True
 
         if dashboard.pause_toggle.value:
-            if game.render and not dashboard.headless_toggle.value:
+            if game.render:
                 representative_index = 0
                 representative_env = envs[representative_index]
                 copy_env_state_to_game(game, representative_env)
@@ -1311,6 +1355,7 @@ def train_parallel_mode(
 
         action_indices = agent.get_action_indices_batch(env_states, greedy=False)
         completed_records = []
+        responsive_chunk = max(4, min(16, parallel_envs // 4 if parallel_envs > 8 else parallel_envs))
 
         for env_index, env in enumerate(envs):
             reward, game_over, score = env.play_step(
@@ -1335,6 +1380,26 @@ def train_parallel_mode(
                     }
                 )
 
+            if (
+                game.render
+                and responsive_chunk > 0
+                and (env_index + 1) % responsive_chunk == 0
+                and env_index + 1 < len(envs)
+            ):
+                pending_events = pygame.event.get()
+                if pending_events:
+                    pending_scaled_events = game.scale_events(pending_events)
+                    dashboard.sync_graph_rect(game)
+                    dashboard.handle_events(pending_scaled_events)
+                    game.handle_system_events(pending_events)
+                    if game.quit_requested:
+                        break
+                    if pending_scaled_events:
+                        frame_due = True
+
+        if game.quit_requested:
+            break
+
         agent.remember_batch(
             env_states,
             action_indices,
@@ -1355,14 +1420,15 @@ def train_parallel_mode(
         for record in completed_records[:remaining_bulk_slots]:
             current_run_number = completed_in_session() + 1
             agent.n_games += 1
-            agent.decay_epsilon()
             dashboard.record_deep_episode(
                 record["score"],
                 record["episode_reward"],
                 loss=agent.last_train_info.get("loss"),
             )
-            best_score = max(best_score, record["score"])
             moving_avg = dashboard.deep_average_history[-1]
+            agent.decay_epsilon()
+            agent.record_episode_outcome(record["score"], moving_avg)
+            best_score = max(best_score, record["score"])
             last_transition = {
                 "reward_text": f"{record['final_reward']:+.2f}",
                 "done": True,
@@ -1420,7 +1486,7 @@ def train_parallel_mode(
             )
             completed_since_print = 0
 
-        if game.render and not dashboard.headless_toggle.value and (frame_due or completed_records):
+        if game.render and (frame_due or completed_records):
             representative_env = envs[0]
             representative_state = env_states[0]
             copy_env_state_to_game(game, representative_env)
@@ -1488,7 +1554,7 @@ def train_parallel_mode(
 
             if sync_agent_device_from_dashboard(agent, dashboard, "parallel evaluation"):
                 configure_agent_for_mode(agent, "parallel")
-            game.speed = 0 if dashboard.headless_toggle.value else dashboard.current_fps
+            game.speed = dashboard.current_fps
 
             if dashboard.pause_toggle.value:
                 preview_action = agent.get_action_details(state, greedy=True)
@@ -1519,7 +1585,7 @@ def train_parallel_mode(
 
             action_info = agent.get_action_details(state, greedy=True)
             step_count += 1
-            render_frame = bool(game.render and not dashboard.headless_toggle.value)
+            render_frame = bool(game.render)
             replay_frame = None
             replay_context = current_context(
                 "Parallel eval",
@@ -1565,7 +1631,7 @@ def train_parallel_mode(
                 action_info["action"],
                 events=[],
                 draw_frame=False,
-                apply_pacing=not dashboard.headless_toggle.value,
+                apply_pacing=game.render,
             )
             episode_reward += reward
             state = agent.encode_state(game)
@@ -1739,6 +1805,7 @@ def train_session(
         checkpoint_state,
         resume,
         trainer_mode,
+        agent.device.type,
     )
     resolved_parallel_envs = resolve_positive_session_int(
         checkpoint_state,
@@ -1764,7 +1831,6 @@ def train_session(
         initial_delay_ms=delay_ms,
         initial_episode_goal=episodes,
         initial_reward_config=initial_reward_config,
-        initial_headless=not render,
         initial_device_preference=agent.device.type,
         cuda_available=cuda_is_available(),
         require_manual_start=render,
@@ -1859,15 +1925,7 @@ def train_session(
             episode_show_baseline = bool(dashboard.baseline_visible)
             episodes_remaining = max(0, current_goal - completed_in_session)
             current_game_number = completed_in_session + 1
-            stripped_episode = bool(
-                episode_fast_mode
-                and (
-                    not render
-                    or dashboard.headless_toggle.value
-                    or episodes_remaining > fast_tail_episodes
-                )
-            )
-            animated_tail_episode = bool(episode_fast_mode and not stripped_episode)
+            stripped_episode = bool(episode_fast_mode)
             replay_capture_episode = episodes_remaining <= 3
 
             game.reset()
@@ -1926,40 +1984,17 @@ def train_session(
                 events = pygame.event.get() if render else []
                 scaled_events = game.scale_events(events) if render else []
                 dashboard.sync_graph_rect(game)
-                headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(scaled_events)
                 game.handle_system_events(events)
-                headless_changed = dashboard.headless_toggle.value != headless_before_events
 
                 if game.quit_requested:
                     break
 
                 sync_agent_device_from_dashboard(agent, dashboard, "training")
-                game.speed = 0 if dashboard.headless_toggle.value else dashboard.current_fps
+                game.speed = dashboard.current_fps
                 game.set_reward_config(dashboard.reward_config)
 
-                if render and headless_changed:
-                    preview_info = agent.get_action_details(state, greedy=True)
-                    draw_dashboard_frame(
-                        game=game,
-                        dashboard=dashboard,
-                        agent=agent,
-                        state=state,
-                        action_info=preview_info,
-                        current_game_number=current_game_number,
-                        episode_goal=episode_goal,
-                        best_score=best_score,
-                        context=current_context("Training"),
-                        lightweight=stripped_episode,
-                        show_baseline=episode_show_baseline,
-                        recent_replays_panel=current_recent_replays_panel(),
-                    )
-
                 if not dashboard.started:
-                    if dashboard.headless_toggle.value:
-                        dashboard.started = True
-                        continue
-
                     preview_info = agent.get_action_details(state, greedy=True)
                     draw_dashboard_frame(
                         game=game,
@@ -1975,7 +2010,11 @@ def train_session(
                         show_baseline=episode_show_baseline,
                         recent_replays_panel=current_recent_replays_panel(),
                         overlay_title="Press Start",
-                        overlay_subtitle="Click Start [Enter] to begin training.",
+                        overlay_subtitle=(
+                            "Fast mode will hide live training and replay the newest 3 runs afterward."
+                            if stripped_episode
+                            else "Click Start [Enter] to begin training."
+                        ),
                     )
                     pygame.time.delay(30)
                     continue
@@ -2010,11 +2049,9 @@ def train_session(
                     lightweight=stripped_episode,
                 )
                 step_count += 1
-                live_render_enabled = (
-                    render and not dashboard.headless_toggle.value and not stripped_episode
-                )
+                live_render_enabled = bool(render and not stripped_episode)
                 live_context = current_context(
-                    "Fast tail" if animated_tail_episode else "Training"
+                    "Fast mode" if episode_fast_mode else "Training"
                 )
 
                 if live_render_enabled or capture_episode_replay:
@@ -2056,7 +2093,7 @@ def train_session(
                     action_info["action"],
                     events=[],
                     draw_frame=False,
-                    apply_pacing=not dashboard.headless_toggle.value and not stripped_episode,
+                    apply_pacing=not stripped_episode,
                 )
                 episode_reward += reward
                 next_state = agent.encode_state(game)
@@ -2081,9 +2118,9 @@ def train_session(
                     "score": score,
                 }
 
-                if render and game_over and not dashboard.headless_toggle.value and not stripped_episode:
+                if render and game_over and not stripped_episode:
                     final_context = current_context(
-                        "Fast tail" if animated_tail_episode else "Training",
+                        "Fast mode" if episode_fast_mode else "Training",
                         train_info_override=train_info,
                     )
                     final_view = build_dashboard_frame(
@@ -2124,7 +2161,7 @@ def train_session(
                     )
                 elif game_over and capture_episode_replay:
                     final_context = current_context(
-                        "Fast tail" if animated_tail_episode else "Training",
+                        "Fast mode" if episode_fast_mode else "Training",
                         train_info_override=train_info,
                     )
                     episode_replay_frames.append(
@@ -2150,12 +2187,14 @@ def train_session(
                 break
 
             agent.n_games += 1
-            agent.decay_epsilon()
             dashboard.record_deep_episode(
                 score,
                 episode_reward,
                 loss=agent.last_train_info.get("loss"),
             )
+            moving_avg = dashboard.deep_average_history[-1]
+            agent.decay_epsilon()
+            agent.record_episode_outcome(score, moving_avg)
             best_score = max(best_score, score)
             if capture_episode_replay and episode_replay_frames:
                 recent_episode_replays.append(
@@ -2180,29 +2219,6 @@ def train_session(
                 best_score=best_score,
             )
             append_metric_entry(metrics_log_path, metric_entry)
-
-            if render and (dashboard.headless_toggle.value or stripped_episode):
-                summary_action = agent.get_action_details(state, greedy=True)
-                draw_dashboard_frame(
-                    game=game,
-                    dashboard=dashboard,
-                    agent=agent,
-                    state=state,
-                    action_info=summary_action,
-                    current_game_number=current_game_number,
-                    episode_goal=dashboard.get_episode_goal(),
-                    best_score=best_score,
-                    context=current_context(
-                        "Fast pass" if stripped_episode else "Headless training",
-                        remaining_override=max(
-                            0,
-                            dashboard.get_episode_goal() - (agent.n_games - session_start_games),
-                        ),
-                    ),
-                    lightweight=stripped_episode,
-                    show_baseline=episode_show_baseline,
-                    recent_replays_panel=current_recent_replays_panel(),
-                )
 
             if agent.n_games % checkpoint_every == 0 or score == best_score:
                 save_checkpoint(
@@ -2291,7 +2307,6 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
         initial_delay_ms=40,
         initial_episode_goal=max(1, len(deep_history.get("scores", []))),
         initial_reward_config=checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG),
-        initial_headless=False,
         initial_device_preference=agent.device.type,
         cuda_available=cuda_is_available(),
         require_manual_start=False,
@@ -2325,16 +2340,14 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
                 events = pygame.event.get()
                 scaled_events = game.scale_events(events)
                 dashboard.sync_graph_rect(game)
-                headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(scaled_events)
                 game.handle_system_events(events)
-                headless_changed = dashboard.headless_toggle.value != headless_before_events
 
                 if game.quit_requested:
                     break
 
                 sync_agent_device_from_dashboard(agent, dashboard, "viewer")
-                game.speed = 0 if dashboard.headless_toggle.value else dashboard.current_fps
+                game.speed = dashboard.current_fps
                 action_info = agent.get_action_details(state, greedy=True)
                 context = build_training_context(
                     "Viewer",
@@ -2356,9 +2369,6 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
                         show_baseline=dashboard.baseline_visible,
                     )
                 )
-
-                if headless_changed:
-                    game.draw()
 
                 if dashboard.pause_toggle.value:
                     game.draw()
@@ -2386,23 +2396,22 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
 
                 if game_over:
                     best_score = max(best_score, score)
-                    if not dashboard.headless_toggle.value:
-                        final_view = dashboard.build_dashboard_data(
-                            agent=agent,
-                            game=game,
-                            state=state,
-                            action_info=action_info,
-                            current_game_number=viewer_episode,
-                            episode_goal=viewer_episode,
-                            best_score=best_score,
-                            context=context,
-                            show_baseline=dashboard.baseline_visible,
-                        )
-                        final_view["overlay_title"] = "Viewer episode finished"
-                        final_view["overlay_subtitle"] = f"Score: {score}"
-                        game.set_dashboard_data(final_view)
-                        game.draw()
-                        pygame.time.delay(250)
+                    final_view = dashboard.build_dashboard_data(
+                        agent=agent,
+                        game=game,
+                        state=state,
+                        action_info=action_info,
+                        current_game_number=viewer_episode,
+                        episode_goal=viewer_episode,
+                        best_score=best_score,
+                        context=context,
+                        show_baseline=dashboard.baseline_visible,
+                    )
+                    final_view["overlay_title"] = "Viewer episode finished"
+                    final_view["overlay_subtitle"] = f"Score: {score}"
+                    game.set_dashboard_data(final_view)
+                    game.draw()
+                    pygame.time.delay(250)
                     break
     finally:
         game.close()
@@ -2410,16 +2419,15 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
 
 def main_train():
     parser = argparse.ArgumentParser(
-        description="Train a Snake DQN with the teaching dashboard or a stripped fast mode."
+        description="Train a Snake DQN in learn mode (single snake) or speed mode (parallel workers)."
     )
-    parser.add_argument("--episodes", type=int, default=300, help="How many games to play this session.")
+    parser.add_argument("--episodes", type=int, default=5000, help="How many games to play this session.")
     parser.add_argument("--speed", type=int, default=16, help="Initial render speed.")
     parser.add_argument("--delay-ms", type=int, default=60, help="Initial frame delay.")
     parser.add_argument("--checkpoint-path", default="dqn_checkpoint.pt", help="Checkpoint file path.")
     parser.add_argument("--metrics-log", default="training_metrics.jsonl", help="JSONL metric log path.")
     parser.add_argument("--resume", action="store_true", help="Resume from an existing checkpoint.")
     parser.add_argument("--checkpoint-every", type=int, default=25, help="Save every N finished games.")
-    parser.add_argument("--no-render", action="store_true", help="Run without the pygame window.")
     parser.add_argument("--comparison-mode", action="store_true", help="Overlay a local tabular baseline.")
     parser.add_argument("--baseline-episodes", type=int, default=120, help="How many baseline episodes to precompute.")
     parser.add_argument(
@@ -2437,19 +2445,19 @@ def main_train():
     parser.add_argument(
         "--fast-mode",
         action="store_true",
-        help="Strip most visualization overhead and animate only the final tail episodes.",
+        help="Hide live rendering in single mode and replay the newest 3 runs afterward.",
     )
     parser.add_argument(
         "--fast-tail-episodes",
         type=parse_positive_int_arg,
         default=5,
-        help="How many ending episodes to animate in fast mode.",
+        help="Legacy fast-mode setting. Replay capture is capped to the newest 3 runs in the current UI.",
     )
     parser.add_argument(
         "--trainer-mode",
         type=parse_trainer_mode_arg,
         default=None,
-        help="Trainer mode. single keeps the teaching workflow, parallel batches headless workers for speed.",
+        help="Trainer mode. single is the learn/inspection path, parallel is the speed/throughput path.",
     )
     parser.add_argument(
         "--parallel-envs",
@@ -2465,9 +2473,9 @@ def main_train():
     )
 
     args = parser.parse_args()
-    render = not args.no_render
-    speed = args.speed if render else 0
-    delay_ms = args.delay_ms if render else 0
+    render = True
+    speed = args.speed
+    delay_ms = args.delay_ms
     hidden_layers = resolve_hidden_layers_for_session(
         checkpoint_path=args.checkpoint_path,
         resume=args.resume,

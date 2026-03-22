@@ -10,6 +10,69 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - teaching-oriented views for `Overview`, `Network`, and `Algorithm`
 - clear docs so another Codex session can continue safely
 
+## Latest status
+
+- standalone `No Render` has now been removed from both the GUI and CLI
+- `Fast Mode` is now the only hidden-training path for `Single` mode
+- `Single` is the learn or inspection path
+- `Parallel` is the speed or throughput path
+- fresh CUDA sessions now default to `GPU + Parallel`
+- fresh CPU-only sessions still default to `CPU + Single`
+- older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
+
+## Current smoke-test commands
+
+Use these current commands instead of the older `--no-render` examples lower in this file:
+
+- `python train.py --episodes 20`
+- `python train.py --episodes 20 --fast-mode`
+- `python train.py --episodes 20 --trainer-mode parallel --parallel-envs 8 --eval-tail-episodes 3 --device auto`
+
+## Latest verification
+
+- `py_compile` passes for the Deep RL runtime files
+- dry-run post-run rendering now succeeds even when `last_transition` is `None`:
+  - `Results`
+  - `Algorithm`
+  - `Network`
+  - `Overview`
+- verified the obsolete floating `control_panel` is no longer present in dashboard payloads
+- verified the hybrid plateau recovery path can trigger epsilon reheats after prolonged stagnation
+- ran a short real runtime smoke through `app_core.train_session(...)` after the new changes:
+  - `render=False + trainer_mode=\"single\" + hidden_layers=[64] + episodes=2` completed successfully
+- verified with direct runtime smoke tests through `app_core.train_session(...)`:
+  - `render=False + trainer_mode=\"single\" + fast_mode=True` completed successfully
+  - `render=False + trainer_mode=\"parallel\" + parallel_envs=4` completed successfully
+- verified helper defaults:
+  - `default_trainer_mode_for_device(\"cuda\") -> \"parallel\"`
+  - `default_trainer_mode_for_device(\"cpu\") -> \"single\"`
+- verified CLI help no longer shows `--no-render`
+
+## Latest UI fixes
+
+- removed the obsolete floating `Controls` card draw path that was overlapping the snake board
+- post-run views now rebuild from fresh finished-state data instead of a stale frozen snapshot
+  - this hardens tab switching across `Overview`, `Network`, `Algorithm`, and `Results`
+  - missing transition data no longer crashes the finished-state algorithm page
+- added hybrid plateau recovery to the DQN:
+  - baseline epsilon still decays episode by episode
+  - when training stalls for `250` completed runs, epsilon reheats to at least `0.12`
+  - reheats decay back down with the existing decay factor
+  - reheats respect a `150`-episode cooldown
+  - reheat state is checkpointed and restored on resume
+  - the snapshot and results views now show exploration mode, stall progress, reheats, and cooldown
+- parallel bulk mode no longer pretends the left board is one live run
+  - the board now switches to an aggregate `Parallel Bulk Training` status panel
+  - the snapshot card now uses `Completed runs` instead of a misleading live-run counter
+  - the right-side decision card becomes `Bulk Throughput` instead of Q-value bars
+- moved the `Scores / Avg / Best` toggles out of the clipped sidebar area
+  - they now render in the lower dock above the loss chart
+  - the old sidebar `History` section was removed
+- tightened lower-dock row spacing so the trainer-mode buttons fit inside the dock instead of clipping
+- render-path smoke tests passed for:
+  - one synthetic parallel-bulk frame
+  - one synthetic single-mode frame
+
 ## Done
 
 - kept this folder independent from `4)Snake AI (with RL)`
@@ -35,10 +98,10 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - target network
 - checkpoint save/load
 - JSONL metric logging
-- headless mode support
+- hidden fast-mode training in single mode, with replay afterward
 - local tabular baseline generation for comparison mode
 - CPU/CUDA device selection through `auto`, `cpu`, and `cuda`
-- optional fast training mode with a stripped early-run path and animated ending tail
+- optional fast training mode with hidden single-snake training and replay of the newest 3 runs afterward
 - optional parallel training mode with batched headless workers and a short rendered evaluation tail
 
 ## Architecture work implemented
@@ -170,6 +233,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - replay storage now uses compact logical frame snapshots instead of only relying on render-time dashboard captures
   - replay playback rebuilds the dashboard frame from stored logical state, action info, and context
   - the newest 3 captured runs remain in-memory only and are still not checkpointed
+  - the finished-window loop now rebuilds the dashboard payload after tab changes, so post-run switching between `Overview`, `Network`, `Algorithm`, and `Results` no longer uses stale finished-state data
 - added a post-training `Results [R]` tab:
   - it appears only after training finishes
   - it shows full-run score, moving-average, best-score, loss, and loss-average history
@@ -193,6 +257,13 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - the full-run results plots reuse the same graph renderer with full-history ranges
   - full-history results plots now use the real completed-episode range instead of forcing a fake 10-episode window on very short runs
   - the results summary card height now grows with the summary text so longer session summaries do not clip
+- improved parallel bulk responsiveness:
+  - UI events are now sampled inside long parallel-env stepping loops instead of only once per outer iteration
+  - user interaction now forces a near-term redraw in parallel mode, so toggles like `Turbo` and trainer/device changes feel less frozen when `parallel_envs` is large
+- updated the stronger default training settings for this project:
+  - default hidden layers are now `256,256,128`
+  - default `--episodes` is now `5000`
+  - default parallel env count is now `64` on CUDA and `16` on CPU when not explicitly provided
 
 ## Validation completed
 

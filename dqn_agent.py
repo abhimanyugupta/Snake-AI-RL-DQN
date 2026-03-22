@@ -22,7 +22,7 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 from snake_game import Direction, Point
 
 
-DEFAULT_HIDDEN_LAYERS = [128, 128]
+DEFAULT_HIDDEN_LAYERS = [256, 256, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
 
@@ -324,6 +324,18 @@ class DQNAgent:
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
+        self.base_epsilon = float(epsilon)
+        self.reheat_epsilon = 0.12
+        self.reheat_patience = 250
+        self.reheat_cooldown = 150
+        self.reheat_avg_margin = 0.5
+        self.reheat_active_epsilon: float | None = None
+        self.reheat_count = 0
+        self.plateau_counter = 0
+        self.cooldown_remaining = 0
+        self.best_episode_score = float("-inf")
+        self.best_moving_avg = float("-inf")
+        self.exploration_mode = "decay"
         self.batch_size = batch_size
         self.warmup_size = warmup_size
         self.target_sync_interval = target_sync_interval
@@ -367,6 +379,7 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
         self.replay_buffer = ReplayBuffer(replay_capacity, len(self.STATE_LABELS))
+        self._refresh_exploration_state()
 
     @property
     def device_label(self) -> str:
@@ -624,7 +637,85 @@ class DQNAgent:
         return info
 
     def decay_epsilon(self) -> None:
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        self.base_epsilon = max(
+            self.epsilon_min,
+            float(self.base_epsilon) * float(self.epsilon_decay),
+        )
+        if self.reheat_active_epsilon is not None:
+            self.reheat_active_epsilon = max(
+                self.base_epsilon,
+                float(self.reheat_active_epsilon) * float(self.epsilon_decay),
+            )
+            if self.reheat_active_epsilon <= self.base_epsilon + 1e-9:
+                self.reheat_active_epsilon = None
+        self._refresh_exploration_state()
+
+    def record_episode_outcome(self, score: float, moving_avg: float) -> None:
+        score = float(score)
+        moving_avg = float(moving_avg)
+        improved = False
+
+        if score > self.best_episode_score:
+            self.best_episode_score = score
+            improved = True
+        if moving_avg > self.best_moving_avg + self.reheat_avg_margin:
+            self.best_moving_avg = moving_avg
+            improved = True
+        elif self.best_moving_avg == float("-inf"):
+            self.best_moving_avg = moving_avg
+
+        if improved:
+            self.plateau_counter = 0
+        else:
+            self.plateau_counter += 1
+
+        if self.cooldown_remaining > 0:
+            self.cooldown_remaining -= 1
+
+        if (
+            self.reheat_active_epsilon is None
+            and self.cooldown_remaining <= 0
+            and self.plateau_counter >= self.reheat_patience
+            and self.base_epsilon < self.reheat_epsilon
+        ):
+            self.reheat_active_epsilon = max(
+                float(self.reheat_epsilon),
+                float(self.base_epsilon),
+                float(self.epsilon),
+            )
+            self.reheat_count += 1
+            self.cooldown_remaining = int(self.reheat_cooldown)
+            self.plateau_counter = 0
+
+        self._refresh_exploration_state()
+
+    def exploration_status(self) -> dict:
+        return {
+            "mode": self.exploration_mode,
+            "reheat_count": int(self.reheat_count),
+            "plateau_counter": int(self.plateau_counter),
+            "plateau_patience": int(self.reheat_patience),
+            "cooldown_remaining": int(self.cooldown_remaining),
+            "base_epsilon": float(self.base_epsilon),
+            "reheat_epsilon": (
+                None
+                if self.reheat_active_epsilon is None
+                else float(self.reheat_active_epsilon)
+            ),
+            "epsilon": float(self.epsilon),
+        }
+
+    def _refresh_exploration_state(self) -> None:
+        if (
+            self.reheat_active_epsilon is not None
+            and self.reheat_active_epsilon > self.base_epsilon + 1e-9
+        ):
+            self.exploration_mode = "reheat"
+            self.epsilon = float(self.reheat_active_epsilon)
+        else:
+            self.reheat_active_epsilon = None
+            self.exploration_mode = "decay"
+            self.epsilon = float(self.base_epsilon)
 
     def index_to_action(self, index: int) -> List[int]:
         action = [0, 0, 0]
@@ -846,6 +937,20 @@ class DQNAgent:
                 "gradient_steps_per_update": int(self.gradient_steps_per_update),
                 "pending_transitions": int(self.pending_transitions),
             },
+            "exploration_state": {
+                "base_epsilon": float(self.base_epsilon),
+                "reheat_active_epsilon": self.reheat_active_epsilon,
+                "reheat_epsilon": float(self.reheat_epsilon),
+                "reheat_patience": int(self.reheat_patience),
+                "reheat_cooldown": int(self.reheat_cooldown),
+                "reheat_avg_margin": float(self.reheat_avg_margin),
+                "reheat_count": int(self.reheat_count),
+                "plateau_counter": int(self.plateau_counter),
+                "cooldown_remaining": int(self.cooldown_remaining),
+                "best_episode_score": float(self.best_episode_score),
+                "best_moving_avg": float(self.best_moving_avg),
+                "exploration_mode": str(self.exploration_mode),
+            },
             "extra_state": extra_state or {},
         }
         torch.save(checkpoint, path)
@@ -882,6 +987,45 @@ class DQNAgent:
         self.pending_transitions = int(
             runtime_config.get("pending_transitions", self.pending_transitions)
         )
+        exploration_state = checkpoint.get("exploration_state", {})
+        self.base_epsilon = float(
+            exploration_state.get("base_epsilon", checkpoint.get("epsilon", self.epsilon))
+        )
+        active_reheat = exploration_state.get("reheat_active_epsilon")
+        self.reheat_active_epsilon = (
+            None if active_reheat is None else float(active_reheat)
+        )
+        self.reheat_epsilon = float(
+            exploration_state.get("reheat_epsilon", self.reheat_epsilon)
+        )
+        self.reheat_patience = int(
+            exploration_state.get("reheat_patience", self.reheat_patience)
+        )
+        self.reheat_cooldown = int(
+            exploration_state.get("reheat_cooldown", self.reheat_cooldown)
+        )
+        self.reheat_avg_margin = float(
+            exploration_state.get("reheat_avg_margin", self.reheat_avg_margin)
+        )
+        self.reheat_count = int(
+            exploration_state.get("reheat_count", self.reheat_count)
+        )
+        self.plateau_counter = int(
+            exploration_state.get("plateau_counter", self.plateau_counter)
+        )
+        self.cooldown_remaining = int(
+            exploration_state.get("cooldown_remaining", self.cooldown_remaining)
+        )
+        self.best_episode_score = float(
+            exploration_state.get("best_episode_score", self.best_episode_score)
+        )
+        self.best_moving_avg = float(
+            exploration_state.get("best_moving_avg", self.best_moving_avg)
+        )
+        self.exploration_mode = str(
+            exploration_state.get("exploration_mode", self.exploration_mode)
+        )
+        self._refresh_exploration_state()
         replay_state = checkpoint.get("replay_buffer")
         if replay_state:
             self.replay_buffer.load_state_dict(replay_state)

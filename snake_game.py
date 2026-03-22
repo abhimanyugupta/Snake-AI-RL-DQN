@@ -591,9 +591,12 @@ class SnakeGameAI(SnakeLogicEnv):
 
         self.display.fill((18, 18, 18))
         self._draw_board_background()
-        self._draw_danger_overlays()
-        self._draw_snake_and_food()
-        self._draw_action_arrows()
+        if self.dashboard_data.get("board_mode") == "parallel_bulk":
+            self._draw_parallel_bulk_board(self.dashboard_data.get("board_panel", {}))
+        else:
+            self._draw_danger_overlays()
+            self._draw_snake_and_food()
+            self._draw_action_arrows()
         self._draw_sidebar()
         self._draw_overlay_message()
         if hasattr(self, "_real_display") and self._real_display is not None:
@@ -857,18 +860,6 @@ class SnakeGameAI(SnakeLogicEnv):
             overview_rect.bottom - content_y,
         )
 
-        control_panel = data.get("control_panel")
-        if control_panel:
-            panel_rect = pygame.Rect(
-                control_panel["x"],
-                control_panel["y"],
-                control_panel["w"],
-                control_panel["h"],
-            )
-            self._draw_card_background(panel_rect)
-            title_surface = self.small_font.render(control_panel.get("title", "Controls"), True, (250, 252, 255))
-            self.display.blit(title_surface, (panel_rect.x + 12, panel_rect.y + 10))
-
         bottom_dock = data.get("bottom_dock")
         if bottom_dock:
             self._draw_bottom_dock(bottom_dock, data)
@@ -877,18 +868,25 @@ class SnakeGameAI(SnakeLogicEnv):
 
         comparison_lines = data.get("comparison_lines", [])
         if comparison_lines:
-            comparison_top = left_content.y + 14
-            if control_panel:
-                comparison_top = max(comparison_top, control_panel["y"] + control_panel["h"] + 14)
-            comparison_rect = pygame.Rect(
-                left_content.x,
-                comparison_top,
-                left_content.width,
-                max(120, left_content.bottom - comparison_top),
+            comparison_top = max(
+                left_content.y + 14,
+                self._overview_sidebar_controls_bottom(data, left_content) + 16,
             )
-            self._draw_text_card(comparison_rect, "Comparison Notes", comparison_lines)
+            available_h = left_content.bottom - comparison_top
+            if available_h >= 96:
+                comparison_rect = pygame.Rect(
+                    left_content.x,
+                    comparison_top,
+                    left_content.width,
+                    available_h,
+                )
+                self._draw_text_card(comparison_rect, "Comparison Notes", comparison_lines)
 
-        q_h = max(146, min(176, int(right_content.height * 0.30)))
+        bulk_card = data.get("decision_card_mode") == "bulk"
+        if bulk_card:
+            q_h = max(174, min(220, int(right_content.height * 0.38)))
+        else:
+            q_h = max(146, min(176, int(right_content.height * 0.30)))
         q_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, q_h)
         if data.get("q_values") is not None:
             self._draw_q_values(q_rect, data)
@@ -948,6 +946,46 @@ class SnakeGameAI(SnakeLogicEnv):
                 loss_rect_data["h"],
             )
             self._draw_loss_graph(loss_rect, data)
+            self._draw_inline_toggles(data.get("graph_toggles", []))
+
+    def _draw_inline_toggles(self, toggles):
+        for toggle in toggles or []:
+            rect = pygame.Rect(toggle["x"], toggle["y"], toggle["w"], toggle["h"])
+            base_color = (65, 180, 100) if toggle["value"] else (50, 52, 60)
+            border_color = (45, 140, 75) if toggle["value"] else (40, 42, 48)
+            pygame.draw.rect(self.display, base_color, rect, border_radius=6)
+            pygame.draw.rect(self.display, border_color, rect, width=2, border_radius=6)
+            text_color = (255, 255, 255) if toggle["value"] else (180, 185, 195)
+            label_surface = self.tiny_font.render(toggle["label"], True, text_color)
+            label_rect = label_surface.get_rect(center=rect.center)
+            self.display.blit(label_surface, label_rect)
+
+    def _overview_sidebar_controls_bottom(self, data, column_rect):
+        bottom = column_rect.y
+        left = column_rect.x - 4
+        right = column_rect.right + 4
+
+        for slider in data.get("sliders", []):
+            track_rect = pygame.Rect(
+                slider["track_x"],
+                slider["track_y"],
+                slider["track_w"],
+                slider["track_h"],
+            )
+            if track_rect.right >= left and track_rect.x <= right:
+                bottom = max(bottom, track_rect.bottom)
+
+        for item in list(data.get("toggles", [])) + list(data.get("control_buttons", [])):
+            rect = pygame.Rect(item["x"], item["y"], item["w"], item["h"])
+            if rect.right >= left and rect.x <= right:
+                bottom = max(bottom, rect.bottom)
+
+        for section in data.get("control_sections", []):
+            section_x = int(section.get("x", -10_000))
+            if left <= section_x <= right:
+                bottom = max(bottom, int(section.get("y", bottom)) + 18)
+
+        return bottom
 
     def _draw_card_background(self, rect):
         """Draw a premium dark card with subtle borders."""
@@ -1475,9 +1513,25 @@ class SnakeGameAI(SnakeLogicEnv):
         self._draw_card_background(rect)
 
         y = rect.y + 12
-        heading = self.small_font.render("Decision & Q-Values", True, (250, 252, 255))
+        heading = self.small_font.render(
+            data.get("decision_card_title", "Decision & Q-Values"),
+            True,
+            (250, 252, 255),
+        )
         self.display.blit(heading, (rect.x + 12, y))
         y += 28
+
+        if data.get("decision_card_mode") == "bulk":
+            max_width = rect.width - 24
+            for line in data.get("decision_summary", []):
+                wrapped_lines = self._wrap_text(str(line), self.tiny_font, max_width)
+                for wrapped in wrapped_lines:
+                    line_surface = self.tiny_font.render(wrapped, True, (190, 198, 210))
+                    self.display.blit(line_surface, (rect.x + 12, y))
+                    y += 16
+                    if y > rect.bottom - 20:
+                        return
+            return
 
         for line in data.get("decision_summary", [])[:3]:
             line_surface = self.tiny_font.render(str(line), True, (190, 198, 210))
@@ -1679,6 +1733,10 @@ class SnakeGameAI(SnakeLogicEnv):
             empty_message="Loss values will appear after completed episodes.",
             min_value=0.0,
             min_ceiling=0.02,
+            header_extra=max(
+                0,
+                int(data.get("bottom_dock", {}).get("loss_rect", {}).get("toggle_strip_bottom", rect.y)) - rect.y - 26,
+            ),
         )
 
     def _draw_series_graph(
@@ -1694,6 +1752,7 @@ class SnakeGameAI(SnakeLogicEnv):
         min_value=0.0,
         min_ceiling=1.0,
         show_window_bar=True,
+        header_extra=0,
     ):
         self._draw_card_background(rect)
 
@@ -1711,7 +1770,7 @@ class SnakeGameAI(SnakeLogicEnv):
             return
 
         legend_x = rect.x + 12
-        legend_y = rect.y + 32
+        legend_y = rect.y + 32 + max(0, int(header_extra))
         legend_max_x = rect.right - 16
         for item in series:
             color = tuple(item.get("color", (200, 200, 200)))
@@ -1841,6 +1900,52 @@ class SnakeGameAI(SnakeLogicEnv):
         end_label = self.tiny_font.render(str(view_end), True, (150, 156, 168))
         self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, plot_rect.bottom + 2))
         self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, plot_rect.bottom + 2))
+
+    def _draw_parallel_bulk_board(self, panel):
+        title = panel.get("title", "Parallel Bulk Training")
+        subtitle = panel.get("subtitle", "")
+        progress_ratio = max(0.0, min(1.0, float(panel.get("progress_ratio", 0.0))))
+        progress_label = panel.get("progress_label", "")
+        lines = list(panel.get("lines", []))
+
+        card_w = min(self.board_w - 72, 520)
+        card_h = min(self.board_h - 96, 320)
+        rect = pygame.Rect(
+            (self.board_w - card_w) // 2,
+            (self.board_h - card_h) // 2,
+            card_w,
+            card_h,
+        )
+        self._draw_card_background(rect)
+
+        title_surface = self.title_font.render(title, True, (250, 252, 255))
+        self.display.blit(title_surface, (rect.x + 18, rect.y + 18))
+
+        subtitle_surface = self.small_font.render(subtitle, True, (130, 205, 255))
+        self.display.blit(subtitle_surface, (rect.x + 18, rect.y + 52))
+
+        y = rect.y + 88
+        bar_rect = pygame.Rect(rect.x + 18, y, rect.width - 36, 14)
+        pygame.draw.rect(self.display, (30, 34, 40), bar_rect, border_radius=7)
+        fill_rect = pygame.Rect(bar_rect.x, bar_rect.y, int(bar_rect.width * progress_ratio), bar_rect.height)
+        pygame.draw.rect(self.display, (80, 190, 255), fill_rect, border_radius=7)
+        pygame.draw.rect(self.display, (55, 60, 70), bar_rect, width=1, border_radius=7)
+        y += 22
+
+        if progress_label:
+            progress_surface = self.small_font.render(progress_label, True, (235, 240, 248))
+            self.display.blit(progress_surface, (rect.x + 18, y))
+            y += 28
+
+        max_width = rect.width - 36
+        for line in lines:
+            wrapped_lines = self._wrap_text(str(line), self.small_font, max_width)
+            for wrapped in wrapped_lines:
+                line_surface = self.small_font.render(wrapped, True, (196, 202, 212))
+                self.display.blit(line_surface, (rect.x + 18, y))
+                y += 22
+                if y > rect.bottom - 24:
+                    return
 
     def _resolve_graph_window(self, total, view_size, view_end):
         if view_end is None:

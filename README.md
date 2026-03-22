@@ -1,8 +1,8 @@
 # Snake AI with Deep RL
 
 This folder is a self-contained Deep RL follow-up to the tabular Snake AI project.
-The current version supports **CPU or CUDA** training, while keeping the same teaching-oriented dashboard and DQN flow.
-It now also supports a separate **parallel training mode** for higher-throughput headless bulk training with a short rendered evaluation tail.
+The current version supports **CPU or CUDA** training while keeping the same teaching-oriented dashboard and DQN flow.
+It also supports a separate **parallel training mode** for higher-throughput bulk training with a short rendered evaluation tail.
 
 ## What this project shows
 
@@ -13,7 +13,7 @@ It now also supports a separate **parallel training mode** for higher-throughput
 - target-network syncing
 - a local tabular baseline for comparison
 - a live neural-network view across configurable hidden layers
-- a separate parallel trainer that batches multiple headless Snake environments for speed
+- a separate parallel trainer that batches multiple Snake environments for speed
 
 ## Files
 
@@ -61,9 +61,8 @@ Useful options:
 
 ```powershell
 python train.py --episodes 100 --resume --device auto
-python train.py --episodes 100 --no-render --device auto
 python train.py --episodes 100 --resume --hidden-layers 128,128 --device cuda
-python train.py --episodes 300 --fast-mode --fast-tail-episodes 5 --device auto
+python train.py --episodes 300 --fast-mode --device auto
 python train.py --episodes 400 --trainer-mode parallel --parallel-envs 8 --eval-tail-episodes 3 --device auto
 ```
 
@@ -74,18 +73,21 @@ Notes:
 - older checkpoints without architecture metadata are treated as `128,128`
 - `--device auto` uses CUDA when available, otherwise CPU
 - `--device cuda` fails clearly if CUDA is unavailable on your machine
-- `--fast-mode` strips most per-step visualization work and animates only the final tail episodes
-- `--fast-tail-episodes` controls how many ending episodes stay fully animated in fast mode
+- fresh CUDA sessions default to `GPU + Parallel`, while CPU-only sessions default to `CPU + Single`
+- `--fast-mode` is the single-snake speedup path: training runs hidden and the newest 3 runs are replayable afterward
 - fast mode skips tabular-baseline generation and hides baseline series while it is active
-- `--trainer-mode parallel` switches to a separate speed-first training path with batched headless workers
+- `--trainer-mode single` is the learning or inspection path for watching one snake train live
+- `--trainer-mode parallel` is the speed or throughput path with batched workers
 - `--parallel-envs` controls how many Snake environments the parallel trainer steps at once
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
-- if `--parallel-envs` is omitted, parallel mode now defaults to `16` on CUDA and `8` on CPU
+- if `--parallel-envs` is omitted, parallel mode now defaults to `64` on CUDA and `16` on CPU
+- the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
-- when a rendered fast-mode session finishes, the UI can replay the last 3 recorded fast episodes from both the board overlay and a `Recent Replays` card in `Overview`
-- the `Recent Replays` card also explains why replay is unavailable when `Fast Mode`, `No Render`, or `Keep open` prevent capture
-- stripped fast episodes now run uncapped, while the final animated tail keeps the full teaching dashboard
-- parallel mode keeps bulk training headless for speed, updates the graph on completed episodes, and renders only the final evaluation tail runs
+- when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
+- the `Recent Replays` card explains when replay is unavailable and what will be captured next
+- fast-mode single training runs uncapped and hidden, then hands off to the post-run results and replay screen
+- parallel mode keeps bulk training speed-first, updates the graph on completed episodes, and renders only the final evaluation tail runs
+- during parallel bulk mode, the left board switches to an aggregate status panel so it does not pretend to show one specific run
 - in parallel mode, only the newest 3 evaluation-tail replays are kept in memory
 - the parallel trainer now reuses preallocated state buffers instead of rebuilding NumPy state batches every step
 
@@ -110,15 +112,14 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 - `E` open the algorithm page
 - `C` select CPU training or viewing
 - `U` select GPU or CUDA training or viewing when CUDA is available
-- `J` select the single teaching trainer before starting
-- `P` select the parallel throughput trainer before starting
+- `J` select the single learn or inspection trainer before starting
+- `P` select the parallel speed or throughput trainer before starting
 - `X` toggle Fast Mode for training sessions
 - `A` toggle action arrows
 - `D` toggle danger overlays
 - `G` toggle the graph
 - `T` toggle turbo mode
 - `K` keep the window open after training
-- `H` toggle no-render mode from the UI
 - `S` toggle score-series visibility
 - `M` toggle moving-average visibility
 - `B` toggle best-score visibility
@@ -127,11 +128,12 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 
 Rendered training sessions now wait for an on-screen `Start` button, so you can choose the runtime device first.
 Rendered training sessions also let you choose `Single [J]` or `Parallel [P]` before start.
-If `No Render` is enabled, training auto-starts and keeps updating the graph in the open window after each episode.
-`Fast Mode [X]` is available in the training UI and applies from the next episode boundary, not in the middle of the current run.
-After a rendered fast-mode session completes, the finish overlay and `Overview` sidebar can replay the last 3 recorded runs without keeping older episode replays in memory.
+`Fast Mode [X]` is the single-mode shortcut for hidden training plus post-run replay of the newest 3 runs.
+After a fast-mode session completes, the finish overlay and `Overview` sidebar can replay the last 3 recorded runs without keeping older episode replays in memory.
 The overview also shows lightweight throughput feedback during training, including episode steps, environment steps per second, and optimizer updates per second.
-In parallel mode, bulk training uses multiple headless Snake environments and the `Network` / `Algorithm` pages switch to placeholders until the final rendered evaluation tail begins.
+In parallel mode, bulk training uses multiple Snake environments and the `Network` / `Algorithm` pages switch to placeholders until the final rendered evaluation tail begins.
+The score-series toggles now live in the lower dock near the loss chart, which keeps them visible on shorter windows.
+Post-run tab switching now rebuilds fresh finished-state views instead of relying on one stale snapshot, so `Overview`, `Network`, `Algorithm`, and `Results` can all be opened safely after training ends.
 
 ## Current implementation note
 
