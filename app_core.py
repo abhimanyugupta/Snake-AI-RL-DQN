@@ -746,6 +746,12 @@ def resolve_parallel_batch_size(device_type):
     return 1024 if str(device_type) == "cuda" else 512
 
 
+def resolve_parallel_env_count(device_type, requested_envs):
+    if requested_envs is not None:
+        return max(1, int(requested_envs))
+    return 16 if str(device_type) == "cuda" else 8
+
+
 def configure_agent_for_mode(agent, trainer_mode):
     trainer_mode = str(trainer_mode).strip().lower()
     if trainer_mode == "parallel":
@@ -918,13 +924,18 @@ def train_parallel_mode(
     parallel_envs = max(1, int(parallel_envs))
     eval_tail_episodes = max(1, int(eval_tail_episodes))
     envs = [SnakeLogicEnv(speed=0) for _ in range(parallel_envs)]
+    reward_config = dict(dashboard.reward_config)
     for env in envs:
-        env.set_reward_config(dashboard.reward_config)
-    env_states = [agent.encode_state(env) for env in envs]
+        env.set_reward_config(reward_config)
+    env_states = agent.encode_states(envs)
+    next_states_batch = np.empty_like(env_states)
+    rewards_batch = np.empty(parallel_envs, dtype=np.float32)
+    dones_batch = np.empty(parallel_envs, dtype=np.float32)
     episode_rewards = [0.0 for _ in envs]
     episode_steps = [0 for _ in envs]
     last_frame_time = 0.0
     bulk_iteration = 0
+    completed_since_print = 0
 
     def completed_in_session():
         return max(0, agent.n_games - session_start_games)
@@ -1008,9 +1019,11 @@ def train_parallel_mode(
         if sync_agent_device_from_dashboard(agent, dashboard, "parallel training"):
             configure_agent_for_mode(agent, "parallel")
 
-        reward_config = dashboard.reward_config
-        for env in envs:
-            env.set_reward_config(reward_config)
+        current_reward_config = dict(dashboard.reward_config)
+        if current_reward_config != reward_config:
+            reward_config = current_reward_config
+            for env in envs:
+                env.set_reward_config(reward_config)
 
         frame_due, last_frame_time = maybe_build_parallel_frame(
             render=game.render,
@@ -1053,34 +1066,24 @@ def train_parallel_mode(
                 pygame.time.delay(5)
             continue
 
-        active_indices = list(range(len(envs)))
-        states_batch = None
-        if active_indices:
-            states_batch = np.stack([env_states[index] for index in active_indices])
-        if states_batch is None or len(states_batch) == 0:
+        if env_states.size == 0:
             break
 
-        action_indices = agent.get_action_indices_batch(states_batch, greedy=False)
-        rewards = []
-        dones = []
-        next_states = []
+        action_indices = agent.get_action_indices_batch(env_states, greedy=False)
         completed_records = []
 
-        for row, env_index in enumerate(active_indices):
-            env = envs[env_index]
+        for env_index, env in enumerate(envs):
             reward, game_over, score = env.play_step(
-                agent.index_to_action(int(action_indices[row])),
+                agent.index_to_action(int(action_indices[env_index])),
                 events=[],
                 draw_frame=False,
                 apply_pacing=False,
             )
             episode_rewards[env_index] += reward
             episode_steps[env_index] += 1
-            next_state = agent.encode_state(env)
-            env_states[env_index] = next_state
-            rewards.append(float(reward))
-            dones.append(float(game_over))
-            next_states.append(next_state)
+            rewards_batch[env_index] = float(reward)
+            dones_batch[env_index] = float(game_over)
+            agent.encode_state(env, out=next_states_batch[env_index])
             if game_over:
                 completed_records.append(
                     {
@@ -1093,17 +1096,18 @@ def train_parallel_mode(
                 )
 
         agent.remember_batch(
-            states_batch,
+            env_states,
             action_indices,
-            rewards,
-            next_states,
-            dones,
+            rewards_batch,
+            next_states_batch,
+            dones_batch,
         )
-        session_perf["env_steps"] += len(active_indices)
+        env_states, next_states_batch = next_states_batch, env_states
+        session_perf["env_steps"] += parallel_envs
         collect_diagnostics = bool(completed_records or frame_due or (bulk_iteration % 16 == 0))
         train_info = agent.train_step(
             collect_diagnostics=collect_diagnostics,
-            num_new_transitions=len(active_indices),
+            num_new_transitions=parallel_envs,
         )
         session_perf["updates"] += int(train_info.get("update_count", 0))
 
@@ -1139,24 +1143,7 @@ def train_parallel_mode(
             if agent.n_games % checkpoint_every == 0:
                 save_parallel_checkpoint()
 
-            perf_info = build_live_train_info(
-                agent.last_train_info,
-                session_perf,
-                record["steps"],
-            )
-            print(
-                f"Parallel run {current_run_number:>4}/{dashboard.get_episode_goal():<4} | "
-                f"Total games: {agent.n_games:>4} | "
-                f"Score: {record['score']:>2} | "
-                f"Best: {best_score:>2} | "
-                f"Epsilon: {agent.epsilon:.3f} | "
-                f"Episode steps: {record['steps']:>4} | "
-                f"Env/s: {perf_info.get('env_steps_per_sec', 0.0):6.1f} | "
-                f"Updates/s: {perf_info.get('updates_per_sec', 0.0):6.1f} | "
-                f"Buffer: {len(agent.replay_buffer)} | "
-                f"Loss: {agent.last_train_info.get('loss')} | "
-                f"Mode: parallel"
-            )
+            completed_since_print += 1
 
             current_goal = dashboard.get_episode_goal()
             render_eval_tail = should_render_eval_tail()
@@ -1166,9 +1153,29 @@ def train_parallel_mode(
                 env = envs[record["env_index"]]
                 env.reset()
                 env.set_reward_config(reward_config)
-                env_states[record["env_index"]] = agent.encode_state(env)
+                agent.encode_state(env, out=env_states[record["env_index"]])
                 episode_rewards[record["env_index"]] = 0.0
                 episode_steps[record["env_index"]] = 0
+
+        if completed_since_print >= 4 or (
+            completed_records and completed_in_session() >= bulk_target
+        ):
+            perf_info = build_live_train_info(
+                agent.last_train_info,
+                session_perf,
+                max(episode_steps) if episode_steps else 0,
+            )
+            print(
+                f"Parallel progress {completed_in_session():>4}/{dashboard.get_episode_goal():<4} | "
+                f"Best: {best_score:>2} | "
+                f"Epsilon: {agent.epsilon:.3f} | "
+                f"Env/s: {perf_info.get('env_steps_per_sec', 0.0):6.1f} | "
+                f"Updates/s: {perf_info.get('updates_per_sec', 0.0):6.1f} | "
+                f"Buffer: {len(agent.replay_buffer)} | "
+                f"Loss: {agent.last_train_info.get('loss')} | "
+                f"Parallel envs: {parallel_envs}"
+            )
+            completed_since_print = 0
 
         if game.render and not dashboard.headless_toggle.value and (frame_due or completed_records):
             representative_env = envs[0]
@@ -1432,7 +1439,7 @@ def train_session(
         resume,
         parallel_envs,
         "parallel_envs",
-        8,
+        resolve_parallel_env_count(agent.device.type, None),
     )
     resolved_eval_tail_episodes = resolve_positive_session_int(
         checkpoint_state,

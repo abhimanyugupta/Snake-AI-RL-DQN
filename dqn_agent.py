@@ -887,7 +887,7 @@ class DQNAgent:
             self.replay_buffer.load_state_dict(replay_state)
         return checkpoint.get("extra_state", {})
 
-    def encode_state(self, game) -> np.ndarray:
+    def encode_state(self, game, out: np.ndarray | None = None) -> np.ndarray:
         head = game.head
         block = game.block_size
         direction = game.direction
@@ -904,34 +904,44 @@ class DQNAgent:
         food_dx_cells = (game.food.x - game.head.x) / float(block)
         food_dy_cells = (game.food.y - game.head.y) / float(block)
 
-        return np.asarray(
-            [
-                float(game.is_collision(point_straight)),
-                float(game.is_collision(point_right)),
-                float(game.is_collision(point_left)),
-                float(direction == Direction.LEFT),
-                float(direction == Direction.RIGHT),
-                float(direction == Direction.UP),
-                float(direction == Direction.DOWN),
-                float(game.food.x < game.head.x),
-                float(game.food.x > game.head.x),
-                float(game.food.y < game.head.y),
-                float(game.food.y > game.head.y),
-                float(food_dx_cells / max_x_steps),
-                float(food_dy_cells / max_y_steps),
-                self._free_space_ratio(game, head, direction, max_travel),
-                self._free_space_ratio(
-                    game, head, self._turn_right(direction), max_travel
-                ),
-                self._free_space_ratio(game, head, self._turn_left(direction), max_travel),
-                float(len(game.snake) / total_cells),
-                float(
-                    (abs(food_dx_cells) + abs(food_dy_cells))
-                    / float(max_x_steps + max_y_steps)
-                ),
-            ],
-            dtype=np.float32,
+        target = out
+        if target is None:
+            target = np.empty(len(self.STATE_LABELS), dtype=np.float32)
+
+        target[0] = float(game.is_collision(point_straight))
+        target[1] = float(game.is_collision(point_right))
+        target[2] = float(game.is_collision(point_left))
+        target[3] = float(direction == Direction.LEFT)
+        target[4] = float(direction == Direction.RIGHT)
+        target[5] = float(direction == Direction.UP)
+        target[6] = float(direction == Direction.DOWN)
+        target[7] = float(game.food.x < game.head.x)
+        target[8] = float(game.food.x > game.head.x)
+        target[9] = float(game.food.y < game.head.y)
+        target[10] = float(game.food.y > game.head.y)
+        target[11] = float(food_dx_cells / max_x_steps)
+        target[12] = float(food_dy_cells / max_y_steps)
+        target[13] = self._free_space_ratio(game, head, direction, max_travel)
+        target[14] = self._free_space_ratio(
+            game, head, self._turn_right(direction), max_travel
         )
+        target[15] = self._free_space_ratio(
+            game, head, self._turn_left(direction), max_travel
+        )
+        target[16] = float(len(game.snake) / total_cells)
+        target[17] = float(
+            (abs(food_dx_cells) + abs(food_dy_cells)) / float(max_x_steps + max_y_steps)
+        )
+        return target
+
+    def encode_states(self, games, out: np.ndarray | None = None) -> np.ndarray:
+        game_count = len(games)
+        target = out
+        if target is None:
+            target = np.empty((game_count, len(self.STATE_LABELS)), dtype=np.float32)
+        for index, game in enumerate(games):
+            self.encode_state(game, out=target[index])
+        return target
 
     def _build_layer_view(
         self,
@@ -1099,12 +1109,12 @@ class DQNAgent:
 
     def _get_q_tensor(self, state: np.ndarray):
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             return self.policy_net(state_tensor.unsqueeze(0)).squeeze(0)
 
     def _get_q_tensor_batch(self, states: np.ndarray):
         states_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             return self.policy_net(states_tensor)
 
     def _q_tensor_to_list(self, q_tensor) -> List[float]:

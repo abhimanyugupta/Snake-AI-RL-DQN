@@ -138,6 +138,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
     - CPU batch size `512`
     - `update_every_transitions = 32`
     - `gradient_steps_per_update = 2`
+    - default parallel env count `16` on CUDA, `8` on CPU when not explicitly provided
   - parallel bulk mode updates the dashboard on a summary cadence instead of every worker step
   - the `Overview` page now switches to throughput-oriented messaging in parallel bulk mode
   - the `Network` and `Algorithm` pages show placeholders during parallel bulk mode and return to teaching detail during the evaluation tail
@@ -145,6 +146,8 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - only the final rendered evaluation-tail runs are kept as replayable last-3 replays
   - parallel-mode metrics are buffered and flushed every 8 completed episodes
   - parallel mode checkpoints on interval and final exit, rather than every new best score
+  - the parallel trainer now reuses preallocated state buffers instead of rebuilding NumPy state batches every step
+  - DQN state encoding now supports filling preallocated output arrays to reduce allocation churn
 - made network inspection lazy:
   - `agent.inspect_network(...)` is no longer built on every dashboard refresh
   - the heavy network payload is now built only when the `Network` tab is active

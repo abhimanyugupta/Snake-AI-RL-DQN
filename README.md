@@ -80,12 +80,14 @@ Notes:
 - `--trainer-mode parallel` switches to a separate speed-first training path with batched headless workers
 - `--parallel-envs` controls how many Snake environments the parallel trainer steps at once
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
+- if `--parallel-envs` is omitted, parallel mode now defaults to `16` on CUDA and `8` on CPU
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
 - when a rendered fast-mode session finishes, the UI can replay the last 3 recorded fast episodes from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card also explains why replay is unavailable when `Fast Mode`, `No Render`, or `Keep open` prevent capture
 - stripped fast episodes now run uncapped, while the final animated tail keeps the full teaching dashboard
 - parallel mode keeps bulk training headless for speed, updates the graph on completed episodes, and renders only the final evaluation tail runs
 - in parallel mode, only the newest 3 evaluation-tail replays are kept in memory
+- the parallel trainer now reuses preallocated state buffers instead of rebuilding NumPy state batches every step
 
 ## Visualizer
 
