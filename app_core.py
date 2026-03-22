@@ -78,6 +78,8 @@ def hold_training_window_open(game, dashboard):
 
     while not game.quit_requested:
         events = pygame.event.get()
+        if hasattr(game, "scale_events"):
+            events = game.scale_events(events)
         game.handle_system_events(events)
 
         for event in events:
@@ -288,7 +290,7 @@ def train_session(
     initial_reward_config = checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG)
     deep_history = checkpoint_state.get("deep_history", deep_history)
 
-    game = SnakeGameAI(w=640, h=700, window_h=980, render=render, speed=speed)
+    game = SnakeGameAI(w=640, h=700, window_h=880, render=render, speed=speed)
     dashboard = TrainingDashboard(
         game,
         initial_speed=speed,
@@ -329,6 +331,8 @@ def train_session(
             while True:
                 episode_goal = dashboard.get_episode_goal()
                 events = pygame.event.get() if render else []
+                if hasattr(game, "scale_events"):
+                    events = game.scale_events(events)
                 dashboard.sync_graph_rect(game)
                 headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)
@@ -538,7 +542,7 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
     deep_history = checkpoint_state.get("deep_history", histories.get("deep", {}))
     baseline_history = histories.get("tabular", {})
 
-    game = SnakeGameAI(w=640, h=700, window_h=980, render=True, speed=speed)
+    game = SnakeGameAI(w=640, h=700, window_h=880, render=True, speed=speed)
     dashboard = TrainingDashboard(
         game,
         initial_speed=speed,
@@ -565,6 +569,8 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed):
 
             while not game.quit_requested:
                 events = pygame.event.get()
+                if hasattr(game, "scale_events"):
+                    events = game.scale_events(events)
                 dashboard.sync_graph_rect(game)
                 headless_before_events = dashboard.headless_toggle.value
                 dashboard.handle_events(events)

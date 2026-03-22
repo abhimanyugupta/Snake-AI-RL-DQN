@@ -188,7 +188,8 @@ class TrainingDashboard:
         }
 
         padding = 20
-        start_y = padding + 46 + 42 + 52 + (7 * 42) + 26
+        self.metrics_row_h = 28
+        start_y = padding + 46 + 42 + 52 + (7 * self.metrics_row_h) + 20
         col_w = (game.sidebar_width - (padding * 2) - 20) // 2
         col_x = game.board_w + padding
         slider_width = col_w
@@ -206,9 +207,13 @@ class TrainingDashboard:
         ]
 
         y = start_y
+        
+        y += 18
         speed_ratio = self._speed_ratio_from_settings(initial_speed, initial_delay_ms)
         self.speed_slider = SliderControl("Training speed", 0.0, 1.0, speed_ratio, col_x, y, slider_width)
-        y += 44
+        y += 40
+        
+        y += 18
         self.food_reward_slider = SliderControl(
             "Food reward",
             1.0,
@@ -218,7 +223,7 @@ class TrainingDashboard:
             y,
             slider_width,
         )
-        y += 44
+        y += 40
         self.death_reward_slider = SliderControl(
             "Death penalty",
             -20.0,
@@ -228,7 +233,7 @@ class TrainingDashboard:
             y,
             slider_width,
         )
-        y += 44
+        y += 40
         self.step_reward_slider = SliderControl(
             "Step reward",
             -1.0,
@@ -239,30 +244,33 @@ class TrainingDashboard:
             slider_width,
         )
 
-        y += 50
-        self.show_arrows_toggle = ToggleControl("Arrows [A]", True, col_x, y, toggle_w, 28)
-        self.show_dangers_toggle = ToggleControl("Danger [D]", True, col_x + toggle_w + 10, y, toggle_w, 28)
-        y += 36
-        self.show_graph_toggle = ToggleControl("Graph [G]", True, col_x, y, toggle_w, 28)
-        self.pause_toggle = ToggleControl("Pause [Space]", False, col_x + toggle_w + 10, y, toggle_w, 28)
-        y += 36
-        self.turbo_toggle = ToggleControl("Turbo [T]", False, col_x, y, toggle_w, 28)
+        y += 42
+        y += 18
+        self.show_arrows_toggle = ToggleControl("Arrows [A]", True, col_x, y, toggle_w, 26)
+        self.show_dangers_toggle = ToggleControl("Danger [D]", True, col_x + toggle_w + 10, y, toggle_w, 26)
+        y += 32
+        self.show_graph_toggle = ToggleControl("Graph [G]", True, col_x, y, toggle_w, 26)
+        self.pause_toggle = ToggleControl("Pause [Space]", False, col_x + toggle_w + 10, y, toggle_w, 26)
+        y += 32
+        self.turbo_toggle = ToggleControl("Turbo [T]", False, col_x, y, toggle_w, 26)
         self.episode_input = TextInputControl(
             "Episode goal",
             initial_episode_goal,
             col_x + toggle_w + 10,
             y,
             toggle_w,
-            30,
+            28,
         )
-        y += 38
-        self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 28)
-        self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 28)
-        y += 36
-        self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 28)
-        self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 28)
-        y += 36
-        self.show_best_toggle = ToggleControl("Best [B]", True, col_x, y, toggle_w, 28)
+        y += 34
+        
+        y += 18
+        self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 26)
+        self.headless_toggle = ToggleControl("No Render [H]", bool(initial_headless), col_x + toggle_w + 10, y, toggle_w, 26)
+        y += 32
+        self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, toggle_w, 26)
+        self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + toggle_w + 10, y, toggle_w, 26)
+        y += 32
+        self.show_best_toggle = ToggleControl("Best [B]", True, col_x, y, toggle_w, 26)
 
         self.sliders = [
             self.speed_slider,
@@ -642,6 +650,7 @@ class TrainingDashboard:
         return {
             "panel_title": "Snake Deep RL Lab",
             "view_mode": self.view_mode,
+            "metrics_row_h": self.metrics_row_h,
             "view_buttons": [
                 self.overview_button.draw_data(self.view_mode == "overview"),
                 self.network_button.draw_data(self.view_mode == "network"),
@@ -767,10 +776,10 @@ class TrainingDashboard:
     def _build_control_sections(self):
         base_x = self.speed_slider.track_rect.x
         return [
-            {"title": "Pace", "x": base_x, "y": self.speed_slider.track_rect.y - 34},
-            {"title": "Rewards", "x": base_x, "y": self.food_reward_slider.track_rect.y - 34},
-            {"title": "Session", "x": base_x, "y": self.show_arrows_toggle.rect.y - 24},
-            {"title": "History", "x": base_x, "y": self.show_scores_toggle.rect.y - 24},
+            {"title": "Pace", "x": base_x, "y": self.speed_slider.track_rect.y - 36},
+            {"title": "Rewards", "x": base_x, "y": self.food_reward_slider.track_rect.y - 36},
+            {"title": "Session", "x": base_x, "y": self.show_arrows_toggle.rect.y - 18},
+            {"title": "History", "x": base_x, "y": self.keep_open_toggle.rect.y - 18},
         ]
 
     def _format_metric(self, value):

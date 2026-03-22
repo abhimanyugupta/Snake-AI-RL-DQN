@@ -1,7 +1,12 @@
 import math
+import os
 import random
 from dataclasses import dataclass
 from enum import Enum
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
 
 try:
     import pygame
@@ -24,6 +29,33 @@ class Point:
     y: int
 
 
+def get_available_display_area():
+    if os.name == "nt":
+        try:
+            work_area = wintypes.RECT()
+            success = ctypes.windll.user32.SystemParametersInfoW(
+                0x0030,
+                0,
+                ctypes.byref(work_area),
+                0,
+            )
+            if success:
+                return (
+                    max(640, work_area.right - work_area.left),
+                    max(720, work_area.bottom - work_area.top),
+                )
+        except Exception:
+            pass
+
+    desktop_sizes = pygame.display.get_desktop_sizes()
+    if desktop_sizes:
+        width, height = desktop_sizes[0]
+        return max(640, int(width)), max(720, int(height) - 40)
+
+    info = pygame.display.Info()
+    return max(640, int(info.current_w)), max(720, int(info.current_h) - 40)
+
+
 class SnakeGameAI:
     """Playable snake game that also exposes helper methods for RL training."""
 
@@ -37,6 +69,8 @@ class SnakeGameAI:
         sidebar_width=860,
         window_h=None,
     ):
+        if render:
+            os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
         pygame.init()
 
         self.board_w = w
@@ -48,14 +82,28 @@ class SnakeGameAI:
         self.render = render
         self.sidebar_width = sidebar_width if render else 0
         requested_window_h = window_h if window_h is not None else self.board_h
-        self.window_w = self.board_w + self.sidebar_width
-        self.window_h = max(self.board_h, requested_window_h)
+        requested_window_w = self.board_w + self.sidebar_width
+        
+        self.logical_w = requested_window_w
+        self.logical_h = max(self.board_h, requested_window_h)
+
+        self.window_w = self.logical_w
+        self.window_h = self.logical_h
+        
         self.quit_requested = False
         self.dashboard_data = {}
         self.reward_config = {"food": 10.0, "death": -10.0, "step": 0.0}
 
         if self.render:
-            self.display = pygame.display.set_mode((self.window_w, self.window_h))
+            available_w, available_h = get_available_display_area()
+            max_window_w = max(self.board_w, available_w - 40)
+            max_window_h = max(self.board_h, available_h - 140)
+            self.window_w = min(self.logical_w, max_window_w)
+            self.window_h = min(self.logical_h, max_window_h)
+            self.sidebar_width = max(0, self.logical_w - self.board_w)
+            
+            self._real_display = pygame.display.set_mode((self.window_w, self.window_h), pygame.RESIZABLE)
+            self.display = pygame.Surface((self.logical_w, self.logical_h))
             pygame.display.set_caption("Snake Deep RL Lab")
             self.title_font = pygame.font.SysFont("arial", 26, bold=True)
             self.font = pygame.font.SysFont("arial", 20)
@@ -76,6 +124,28 @@ class SnakeGameAI:
 
         self.clock = pygame.time.Clock()
         self.reset()
+
+    def scale_events(self, events):
+        if not hasattr(self, "_real_display") or self._real_display is None:
+            return events
+            
+        rw, rh = self._real_display.get_size()
+        lw, lh = self.logical_w, self.logical_h
+        
+        scaled_events = []
+        for e in events:
+            if e.type == pygame.VIDEORESIZE:
+                self.window_w, self.window_h = e.size
+                scaled_events.append(e)
+            elif e.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+                rx, ry = e.pos
+                sx, sy = int(rx * lw / rw), int(ry * lh / rh)
+                new_dict = dict(e.__dict__)
+                new_dict['pos'] = (sx, sy)
+                scaled_events.append(pygame.event.Event(e.type, new_dict))
+            else:
+                scaled_events.append(e)
+        return scaled_events
 
     def reset(self):
         """Reset the game so training can start a fresh episode."""
@@ -148,6 +218,7 @@ class SnakeGameAI:
 
         if events is None:
             events = pygame.event.get() if self.render else []
+            events = self.scale_events(events)
 
         self.handle_system_events(events)
         if self.quit_requested:
@@ -285,6 +356,8 @@ class SnakeGameAI:
         self._draw_action_arrows()
         self._draw_sidebar()
         self._draw_overlay_message()
+        if hasattr(self, "_real_display") and self._real_display is not None:
+            pygame.transform.smoothscale(self.display, self._real_display.get_size(), self._real_display)
         pygame.display.flip()
 
     def _draw_board_background(self):
@@ -521,9 +594,10 @@ class SnakeGameAI:
             left_col.height,
         )
         metrics_rows = max(1, (len(data.get("metrics", [])) + 1) // 2)
-        metrics_h = 52 + metrics_rows * 42
+        metrics_row_h = int(data.get("metrics_row_h", 36))
+        metrics_h = 52 + metrics_rows * metrics_row_h
         metrics_rect = pygame.Rect(overview_rect.x, overview_rect.y, overview_rect.width, metrics_h)
-        self._draw_metrics_card(metrics_rect, data.get("metrics", []))
+        self._draw_metrics_card(metrics_rect, data.get("metrics", []), row_h=metrics_row_h)
 
         content_y = metrics_rect.bottom + 15
         left_content = pygame.Rect(
@@ -566,7 +640,7 @@ class SnakeGameAI:
             )
             self._draw_text_card(comparison_rect, "Comparison Notes", comparison_lines)
 
-        q_h = 176
+        q_h = max(140, min(176, int(right_content.height * 0.30)))
         q_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, q_h)
         if data.get("q_values") is not None:
             self._draw_q_values(q_rect, data)
@@ -574,7 +648,7 @@ class SnakeGameAI:
         right_content.y += q_h + 15
         right_content.height -= q_h + 15
 
-        graph_h = 280
+        graph_h = max(150, min(280, right_content.height - 96))
         graph_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, graph_h)
         data["_graph_rect"] = graph_rect
         self._draw_graph(graph_rect, data)
@@ -624,7 +698,7 @@ class SnakeGameAI:
                 self.display.blit(surface, (rect.x + 12, y))
                 y += 18
 
-    def _draw_metrics_card(self, rect, metrics):
+    def _draw_metrics_card(self, rect, metrics, row_h=36):
         self._draw_card_background(rect)
         title_surface = self.small_font.render("Training Snapshot", True, (250, 252, 255))
         self.display.blit(title_surface, (rect.x + 12, rect.y + 10))
@@ -634,7 +708,6 @@ class SnakeGameAI:
         inner_w = rect.width - 24
         col_gap = 10
         col_w = (inner_w - col_gap) // 2
-        row_h = 42
 
         for index, (label, value) in enumerate(metrics):
             col = index % 2
@@ -649,9 +722,13 @@ class SnakeGameAI:
             pygame.draw.rect(self.display, (52, 58, 68), card_rect, width=1, border_radius=8)
             label_surface = self.tiny_font.render(str(label).upper(), True, (134, 142, 154))
             value_surface = self.tiny_font.render(str(value), True, (238, 242, 249))
-            self.display.blit(label_surface, (card_rect.x + 8, card_rect.y + 6))
-            value_y = card_rect.bottom - value_surface.get_height() - 6
-            self.display.blit(value_surface, (card_rect.x + 8, value_y))
+            
+            label_y = card_rect.y + (card_rect.height - label_surface.get_height()) // 2
+            value_y = card_rect.y + (card_rect.height - value_surface.get_height()) // 2
+            
+            self.display.blit(label_surface, (card_rect.x + 8, label_y))
+            value_x = card_rect.right - value_surface.get_width() - 8
+            self.display.blit(value_surface, (value_x, value_y))
 
     def _estimate_text_card_height(self, lines, width):
         base = 48
@@ -1341,6 +1418,7 @@ class SnakeGameAI:
 
         while not self.quit_requested:
             events = pygame.event.get()
+            events = self.scale_events(events)
             self.handle_system_events(events)
 
             for event in events:

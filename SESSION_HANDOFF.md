@@ -75,6 +75,13 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
   - the toggle now repaints immediately
   - the graph now refreshes after each completed run in headless mode
 - added score-axis labels to the training graph for easier reading
+- made the pygame window fit the usable desktop height more safely so it does not drop below the taskbar on typical Windows layouts
+- made the `Overview` page compress the right-side Q-value and graph cards a bit when the window is shorter
+- reduced the requested training/viewer window height to `940` and added a larger desktop-height safety margin, because the earlier clamp was still too optimistic on some Windows setups
+- tightened that again after a follow-up report:
+  - requested window height is now `880`
+  - desktop-height safety margin is now larger
+  - the `Overview` sidebar uses a more compact metric/control layout so the options fit on shorter windows
 - improved the network page further with:
   - a dominant-path summary
   - a color legend
