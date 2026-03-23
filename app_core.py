@@ -142,6 +142,7 @@ def hold_training_window_open(
 ):
     pygame.event.clear()
     recent_episode_replays = list(recent_episode_replays or [])
+    last_good_view = None
 
     def build_base_results_view(view_mode=None):
         if callable(base_view_builder):
@@ -210,7 +211,41 @@ def hold_training_window_open(
         frame.pop("overlay_buttons", None)
         return frame
 
-    game.set_dashboard_data(current_finished_view())
+    def apply_finished_view(preferred_view=None):
+        nonlocal last_good_view
+        if preferred_view is not None:
+            dashboard.view_mode = preferred_view
+        try:
+            frame = current_finished_view()
+            game.set_dashboard_data(frame)
+            last_good_view = copy.deepcopy(frame)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive post-run recovery
+            print(f"Post-run view refresh failed: {exc}")
+            fallback_view = preferred_view if preferred_view is not None else (
+                "results" if dashboard.results_ready else "overview"
+            )
+            dashboard.view_mode = fallback_view
+            try:
+                fallback = current_finished_view()
+                game.set_dashboard_data(fallback)
+                last_good_view = copy.deepcopy(fallback)
+                return True
+            except Exception as fallback_exc:  # pragma: no cover - defensive fallback
+                print(f"Post-run fallback refresh failed: {fallback_exc}")
+                if isinstance(last_good_view, dict):
+                    game.set_dashboard_data(copy.deepcopy(last_good_view))
+                    return True
+                return False
+
+    if not apply_finished_view("results" if dashboard.results_ready else "overview"):
+        return
+    try:
+        game.draw()
+        dashboard.sync_graph_rect(game)
+    except Exception as exc:  # pragma: no cover - defensive post-run recovery
+        print(f"Post-run initial draw failed: {exc}")
+        return
 
     while not game.quit_requested:
         events = pygame.event.get()
@@ -254,13 +289,33 @@ def hold_training_window_open(
             play_episode_replay(game, dashboard, agent, recent_episode_replays[replay_index])
             if game.quit_requested:
                 return
-            game.set_dashboard_data(current_finished_view())
+            if not apply_finished_view():
+                return
+            try:
+                game.draw()
+                dashboard.sync_graph_rect(game)
+            except Exception as exc:  # pragma: no cover - defensive post-run recovery
+                print(f"Post-run redraw after replay failed: {exc}")
+                return
             continue
 
         dashboard.sync_graph_rect(game)
         dashboard.handle_events(scaled_events)
-        game.set_dashboard_data(current_finished_view())
-        game.draw()
+        if not apply_finished_view():
+            return
+        try:
+            game.draw()
+            dashboard.sync_graph_rect(game)
+        except Exception as exc:  # pragma: no cover - defensive post-run recovery
+            print(f"Post-run draw failed: {exc}")
+            if not apply_finished_view("results" if dashboard.results_ready else "overview"):
+                return
+            try:
+                game.draw()
+                dashboard.sync_graph_rect(game)
+            except Exception as fallback_exc:  # pragma: no cover - defensive post-run recovery
+                print(f"Post-run fallback draw failed: {fallback_exc}")
+                return
         pygame.time.delay(30)
 
 
@@ -817,6 +872,10 @@ def clone_dashboard_state(target_dashboard, source_dashboard):
     target_dashboard.stall_threshold_input.last_valid_value = source_dashboard.stall_threshold_input.last_valid_value
     target_dashboard.graph_view_end = source_dashboard.graph_view_end
     target_dashboard.graph_view_size = source_dashboard.graph_view_size
+    target_dashboard.results_hover_index = source_dashboard.results_hover_index
+    target_dashboard.results_slider_drag_active = False
+    target_dashboard.results_slider_rect = None
+    target_dashboard.results_graph_rects = []
     target_dashboard.pending_trainer_mode = None
 
 

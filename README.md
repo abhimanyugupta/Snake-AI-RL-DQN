@@ -139,6 +139,7 @@ The overview also shows lightweight throughput feedback during training, includi
 In parallel mode, bulk training uses multiple Snake environments and the `Network` / `Algorithm` pages switch to placeholders until the final rendered evaluation tail begins.
 The score-series toggles now live in the lower dock near the loss chart, which keeps them visible on shorter windows.
 Post-run tab switching now rebuilds fresh finished-state views instead of relying on one stale snapshot, so `Overview`, `Network`, `Algorithm`, and `Results` can all be opened safely after training ends.
+The post-run `Results` tab now includes an episode slider so you can scrub across the run and inspect score and loss values at different points in training.
 
 ## Current implementation note
 

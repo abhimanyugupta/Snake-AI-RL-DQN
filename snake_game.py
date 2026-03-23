@@ -1719,43 +1719,104 @@ class SnakeGameAI(SnakeLogicEnv):
 
     def _draw_results_page(self, rect, data):
         data["_graph_rect"] = None
+        data["_results_graph_rects"] = []
+        data["_results_slider_rect"] = None
         summary_lines = data.get("results_summary_lines", [])
         score_series = data.get("results_score_series", [])
         loss_series = data.get("results_loss_series", [])
+        hover_index = data.get("results_hover_index")
 
         summary_h = max(142, 54 + len(summary_lines) * 18)
-        score_h = max(160, (rect.height - summary_h - 24) // 2)
+        scrubber_h = 54
+        score_h = max(144, (rect.height - summary_h - scrubber_h - 36) // 2)
         summary_rect = pygame.Rect(rect.x, rect.y, rect.width, summary_h)
-        score_rect = pygame.Rect(rect.x, summary_rect.bottom + 12, rect.width, score_h)
+        scrubber_rect = pygame.Rect(rect.x, summary_rect.bottom + 12, rect.width, scrubber_h)
+        score_rect = pygame.Rect(rect.x, scrubber_rect.bottom + 12, rect.width, score_h)
         loss_rect = pygame.Rect(rect.x, score_rect.bottom + 12, rect.width, rect.bottom - score_rect.bottom - 12)
 
         self._draw_text_card(summary_rect, "Full Run Summary", summary_lines)
         score_total = max((len(item.get("values", [])) for item in score_series), default=0)
         loss_total = max((len(item.get("values", [])) for item in loss_series), default=0)
-        self._draw_series_graph(
+        results_total = max(score_total, loss_total)
+        slider_rect = self._draw_results_scrubber(
+            scrubber_rect,
+            hover_index,
+            results_total,
+            score_series,
+            loss_series,
+        )
+        score_meta = self._draw_series_graph(
             score_rect,
             "Full Score History",
             score_series,
             view_size=max(2, score_total or 2),
             view_end=score_total or None,
-            hover_index=None,
+            hover_index=hover_index,
             empty_message="Score history will appear once completed runs are available.",
             min_value=0.0,
             min_ceiling=1.0,
             show_window_bar=False,
         )
-        self._draw_series_graph(
+        loss_meta = self._draw_series_graph(
             loss_rect,
             "Full Loss History",
             loss_series,
             view_size=max(2, loss_total or 2),
             view_end=loss_total or None,
-            hover_index=None,
+            hover_index=hover_index,
             empty_message="Loss history will appear once training updates have been recorded.",
             min_value=0.0,
             min_ceiling=0.02,
             show_window_bar=False,
         )
+        data["_results_slider_rect"] = slider_rect
+        data["_results_graph_rects"] = [
+            score_meta.get("plot_rect") if isinstance(score_meta, dict) else None,
+            loss_meta.get("plot_rect") if isinstance(loss_meta, dict) else None,
+        ]
+
+    def _draw_results_scrubber(self, rect, hover_index, total, score_series, loss_series):
+        self._draw_card_background(rect)
+        title = self.tiny_font.render("Episode Slider", True, (250, 252, 255))
+        self.display.blit(title, (rect.x + 12, rect.y + 10))
+
+        if total <= 0:
+            message = self.tiny_font.render(
+                "Completed runs will appear here once history is available.",
+                True,
+                (130, 136, 148),
+            )
+            self.display.blit(message, (rect.x + 12, rect.y + 30))
+            return None
+
+        clamped_index = max(0, min(total - 1, int(hover_index if hover_index is not None else total - 1)))
+        ratio = 0.0 if total <= 1 else clamped_index / max(1, total - 1)
+        label_text = f"Episode {clamped_index + 1} of {total}"
+        label_surface = self.tiny_font.render(label_text, True, (160, 206, 255))
+        self.display.blit(label_surface, (rect.right - 12 - label_surface.get_width(), rect.y + 10))
+
+        track_rect = pygame.Rect(rect.x + 14, rect.y + 30, rect.width - 28, 8)
+        hit_rect = pygame.Rect(track_rect.x, track_rect.y - 10, track_rect.width, 28)
+        pygame.draw.rect(self.display, (30, 34, 40), track_rect, border_radius=4)
+        pygame.draw.rect(self.display, (58, 64, 72), track_rect, width=1, border_radius=4)
+
+        thumb_x = track_rect.x + int(ratio * track_rect.width)
+        thumb_rect = pygame.Rect(thumb_x - 6, track_rect.y - 4, 12, 16)
+        pygame.draw.rect(self.display, (80, 190, 255), thumb_rect, border_radius=6)
+        pygame.draw.rect(self.display, (186, 228, 255), thumb_rect, width=1, border_radius=6)
+
+        selected_parts = []
+        for collection in (score_series, loss_series):
+            for item in collection:
+                values = item.get("values", [])
+                if clamped_index < len(values):
+                    selected_parts.append(
+                        f"{item.get('label', 'Series')}: {self._format_axis_value(values[clamped_index])}"
+                    )
+        detail_text = "   ".join(selected_parts[:5]) if selected_parts else "No values recorded yet."
+        detail_surface = self.tiny_font.render(detail_text, True, (196, 202, 212))
+        self.display.blit(detail_surface, (rect.x + 12, rect.y + 42))
+        return hit_rect
 
     def _draw_graph(self, rect, data):
         if not data.get("show_graph"):
@@ -1818,7 +1879,13 @@ class SnakeGameAI(SnakeLogicEnv):
         if not series:
             no_data = self.tiny_font.render(empty_message, True, (120, 125, 135))
             self.display.blit(no_data, (rect.x + 12, rect.y + 40))
-            return
+            return {
+                "plot_rect": None,
+                "bar_rect": None,
+                "view_start": 0,
+                "view_end": 0,
+                "total": 0,
+            }
 
         legend_x = rect.x + 12
         legend_y = rect.y + 32 + max(0, int(header_extra))
@@ -1838,7 +1905,13 @@ class SnakeGameAI(SnakeLogicEnv):
         if total < 2:
             no_data = self.tiny_font.render(empty_message, True, (120, 125, 135))
             self.display.blit(no_data, (rect.x + 12, rect.y + 40))
-            return
+            return {
+                "plot_rect": None,
+                "bar_rect": None,
+                "view_start": 0,
+                "view_end": total,
+                "total": total,
+            }
 
         view_size, view_end, view_start = self._resolve_graph_window(total, view_size, view_end)
         plot_rect = pygame.Rect(
@@ -1932,6 +2005,7 @@ class SnakeGameAI(SnakeLogicEnv):
             tip_y = plot_rect.y + 8
             self._draw_tooltip(tip_x, tip_y, tooltip_lines)
 
+        bar_rect = None
         if show_window_bar:
             bar_y = rect.bottom - 18
             bar_rect = pygame.Rect(rect.x + 15, bar_y, rect.width - 30, 8)
@@ -1951,6 +2025,13 @@ class SnakeGameAI(SnakeLogicEnv):
         end_label = self.tiny_font.render(str(view_end), True, (150, 156, 168))
         self.display.blit(start_label, (plot_rect.x - start_label.get_width() // 2, plot_rect.bottom + 2))
         self.display.blit(end_label, (plot_rect.right - end_label.get_width() // 2, plot_rect.bottom + 2))
+        return {
+            "plot_rect": plot_rect,
+            "bar_rect": bar_rect,
+            "view_start": view_start,
+            "view_end": view_end,
+            "total": total,
+        }
 
     def _draw_parallel_bulk_board(self, panel):
         title = panel.get("title", "Parallel Bulk Training")

@@ -21,6 +21,8 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - training now supports `Q` as an early-finish hotkey that still lands in results and replays
 - the stall threshold now defaults to `150` and is intended to be editable from the lower dock
 - repeated spin-loop behavior now gets a small soft penalty instead of only timing out
+- the post-run `Results` tab now has an interactive episode slider or scrubber for inspecting values across the full run
+- the finished-window loop has extra defensive rebuilding so post-run tab clicks do not immediately tear down the window on view refresh errors
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -53,6 +55,9 @@ Use these current commands instead of the older `--no-render` examples lower in 
 - verified the new loop-penalty helper smoke: repeated identical movement signatures trigger the extra penalty
 - verified the new stall-threshold input default resolves to `150`
 - verified checkpoint save/load now persists the stall threshold in `trainer_config`
+- verified a dummy-display post-run smoke:
+  - `Results`, `Overview`, `Network`, `Algorithm`, then back to `Results` all redraw cleanly
+  - the new results slider updates the selected episode index
 
 ## Latest UI fixes
 
@@ -252,6 +257,7 @@ Use these current commands instead of the older `--no-render` examples lower in 
 - added a post-training `Results [R]` tab:
   - it appears only after training finishes
   - it shows full-run score, moving-average, best-score, loss, and loss-average history
+  - it now includes an interactive episode slider so you can scrub across the run and inspect values on both results graphs
   - the finished flow auto-focuses `Results`
   - the full results view is exported as `training_summary.png` in this project folder on each completed run
 - trainer-mode switching is now queue-based during active training:

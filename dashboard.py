@@ -412,6 +412,10 @@ class TrainingDashboard:
         self.graph_drag_start_end = 0
         self.graph_hover_index = None
         self.graph_rect = None
+        self.results_graph_rects = []
+        self.results_slider_rect = None
+        self.results_slider_drag_active = False
+        self.results_hover_index = None
         self.baseline_visible = True
         self.pending_trainer_mode = None
         self.results_ready = False
@@ -587,6 +591,14 @@ class TrainingDashboard:
             self.graph_rect = data["_graph_rect"]
         else:
             self.graph_rect = None
+        if data and "_results_graph_rects" in data:
+            self.results_graph_rects = [rect for rect in data.get("_results_graph_rects", []) if rect]
+        else:
+            self.results_graph_rects = []
+        if data and "_results_slider_rect" in data:
+            self.results_slider_rect = data.get("_results_slider_rect")
+        else:
+            self.results_slider_rect = None
 
     def graph_total_points(self):
         total = 0
@@ -604,6 +616,15 @@ class TrainingDashboard:
                 total = max(total, len(self.baseline_best_history))
         return total
 
+    def results_total_points(self):
+        return max(
+            len(self.deep_scores),
+            len(self.deep_average_history),
+            len(self.deep_best_history),
+            len(self.deep_loss_history),
+            len(self.deep_loss_average_history),
+        )
+
     def handle_events(self, events):
         for event in events:
             consumed_by_input = False
@@ -615,7 +636,10 @@ class TrainingDashboard:
             if consumed_by_input:
                 continue
 
-            if self._handle_graph_event(event):
+            if self.view_mode == "results":
+                if self._handle_results_graph_event(event):
+                    continue
+            elif self._handle_graph_event(event):
                 continue
 
             for button in self.active_view_button_controls():
@@ -698,6 +722,62 @@ class TrainingDashboard:
 
         return False
 
+    def _handle_results_graph_event(self, event):
+        total = self.results_total_points()
+        plot_rects = [rect for rect in self.results_graph_rects if rect]
+        slider_rect = self.results_slider_rect
+        if total < 1 or (not plot_rects and slider_rect is None):
+            return False
+
+        if self.results_hover_index is None and total > 0:
+            self.results_hover_index = total - 1
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if slider_rect and slider_rect.collidepoint(event.pos):
+                self.results_slider_drag_active = True
+                self._update_results_hover_from_slider(event.pos[0], total)
+                return True
+            for plot_rect in plot_rects:
+                if plot_rect.collidepoint(event.pos):
+                    self._update_results_hover_from_plot(plot_rect, event.pos[0], total)
+                    return True
+
+        if event.type == pygame.MOUSEMOTION:
+            if self.results_slider_drag_active:
+                self._update_results_hover_from_slider(event.pos[0], total)
+                return True
+            for plot_rect in plot_rects:
+                if plot_rect.collidepoint(event.pos):
+                    self._update_results_hover_from_plot(plot_rect, event.pos[0], total)
+                    return True
+
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.results_slider_drag_active:
+            self.results_slider_drag_active = False
+            self._update_results_hover_from_slider(event.pos[0], total)
+            return True
+
+        return False
+
+    def _update_results_hover_from_plot(self, plot_rect, mouse_x, total):
+        if total <= 0 or plot_rect.width <= 0:
+            return
+        ratio = (mouse_x - plot_rect.x) / max(1, plot_rect.width)
+        self._set_results_hover_from_ratio(ratio, total)
+
+    def _update_results_hover_from_slider(self, mouse_x, total):
+        slider_rect = self.results_slider_rect
+        if total <= 0 or slider_rect is None or slider_rect.width <= 0:
+            return
+        ratio = (mouse_x - slider_rect.x) / max(1, slider_rect.width)
+        self._set_results_hover_from_ratio(ratio, total)
+
+    def _set_results_hover_from_ratio(self, ratio, total):
+        if total <= 0:
+            self.results_hover_index = None
+            return
+        ratio = max(0.0, min(1.0, float(ratio)))
+        self.results_hover_index = int(round(ratio * max(0, total - 1)))
+
     def _handle_shortcuts(self, key):
         if key == pygame.K_SPACE:
             if self.started:
@@ -754,10 +834,15 @@ class TrainingDashboard:
             self.turbo_toggle.value = True
             self.speed_slider.set_normalized(1.0)
         elif key == pygame.K_f:
-            total = self.graph_total_points()
-            if total > 0:
-                self.graph_view_size = total
-                self.graph_view_end = None
+            if self.view_mode == "results":
+                total = self.results_total_points()
+                if total > 0:
+                    self.results_hover_index = total - 1
+            else:
+                total = self.graph_total_points()
+                if total > 0:
+                    self.graph_view_size = total
+                    self.graph_view_end = None
 
     def _handle_control_button(self, mode_value):
         if mode_value == "start":
@@ -1086,6 +1171,20 @@ class TrainingDashboard:
                 "thickness": 2,
             },
         ]
+        results_total = max(
+            len(self.deep_scores),
+            len(self.deep_average_history),
+            len(self.deep_best_history),
+            len(self.deep_loss_history),
+            len(self.deep_loss_average_history),
+        )
+        if results_total > 0:
+            if self.results_hover_index is None:
+                self.results_hover_index = results_total - 1
+            else:
+                self.results_hover_index = max(0, min(results_total - 1, int(self.results_hover_index)))
+        else:
+            self.results_hover_index = None
         results_summary_lines = [
             f"Completed runs: {completed_runs}",
             f"Best score: {max(self.deep_best_history) if self.deep_best_history else 0}",
@@ -1185,6 +1284,7 @@ class TrainingDashboard:
             "results_score_series": results_score_series,
             "results_loss_series": results_loss_series,
             "results_summary_lines": results_summary_lines,
+            "results_hover_index": self.results_hover_index,
             "board_mode": board_mode,
             "board_panel": board_panel,
             "decision_card_title": "Bulk Throughput" if parallel_bulk_mode else "Decision & Q-Values",
