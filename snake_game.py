@@ -837,8 +837,8 @@ class SnakeGameAI(SnakeLogicEnv):
         col_gap = 20
         col_w = (self.sidebar_width - (padding * 2) - col_gap) // 2
 
-        left_col = pygame.Rect(panel_x + padding, padding, col_w, self.window_h - padding * 2)
-        right_col = pygame.Rect(panel_x + padding + col_w + col_gap, padding, col_w, self.window_h - padding * 2)
+        left_col = pygame.Rect(panel_x + padding, padding, col_w, self.logical_h - padding * 2)
+        right_col = pygame.Rect(panel_x + padding + col_w + col_gap, padding, col_w, self.logical_h - padding * 2)
 
         title = data.get("panel_title", "Snake Deep RL Lab")
         title_surface = self.title_font.render(title, True, (250, 252, 255))
