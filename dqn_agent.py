@@ -63,6 +63,15 @@ def cuda_is_available() -> bool:
     return bool(torch.cuda.is_available())
 
 
+def load_torch_checkpoint(path: str, map_location) -> dict:
+    # These checkpoints are produced locally by this app and include replay-buffer
+    # NumPy arrays, so PyTorch 2.6+ safe-loading defaults are too restrictive here.
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def extract_hidden_layers_from_checkpoint(checkpoint: dict) -> List[int]:
     network_config = checkpoint.get("network_config", {})
     hidden_layers = network_config.get("hidden_layers")
@@ -72,7 +81,7 @@ def extract_hidden_layers_from_checkpoint(checkpoint: dict) -> List[int]:
 
 
 def load_checkpoint_network_config(path: str) -> dict:
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = load_torch_checkpoint(path, map_location="cpu")
     hidden_layers = extract_hidden_layers_from_checkpoint(checkpoint)
     network_config = dict(checkpoint.get("network_config", {}))
     network_config["hidden_layers"] = hidden_layers
@@ -956,7 +965,7 @@ class DQNAgent:
         torch.save(checkpoint, path)
 
     def load(self, path: str) -> dict:
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = load_torch_checkpoint(path, map_location=self.device)
         checkpoint_hidden_layers = extract_hidden_layers_from_checkpoint(checkpoint)
         if checkpoint_hidden_layers != self.hidden_layers:
             raise ValueError(

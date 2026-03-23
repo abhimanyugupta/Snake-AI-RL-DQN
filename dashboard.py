@@ -196,7 +196,7 @@ class TrainingDashboard:
 
         padding = 20
         self.metrics_row_h = 28
-        start_y = padding + 46 + 42 + 52 + (7 * self.metrics_row_h) + 20
+        start_y = padding + 46 + 42 + 52 + (9 * self.metrics_row_h) + 20
         col_w = (game.sidebar_width - (padding * 2) - 20) // 2
         col_x = game.board_w + padding
         slider_width = col_w
@@ -295,8 +295,10 @@ class TrainingDashboard:
         self.show_graph_toggle = ToggleControl("Graph [G]", True, col_x, y, toggle_w, 26)
         self.pause_toggle = ToggleControl("Pause [Space]", False, col_x + toggle_w + 10, y, toggle_w, 26)
         self.start_button = ButtonControl("Start [Enter]", col_x + toggle_w + 10, y, toggle_w, 26, "start")
-        y += 48
+        y += 32
         self.turbo_toggle = ToggleControl("Turbo [T]", False, col_x, y, toggle_w, 26)
+        self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x + toggle_w + 10, y, toggle_w, 26)
+        
         self.episode_input = TextInputControl(
             "Episode goal",
             initial_episode_goal,
@@ -313,8 +315,6 @@ class TrainingDashboard:
             dock_col_w,
             28,
         )
-        y += 36
-        self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x, y, toggle_w, 26)
         y += 32
 
         dock_row_y += 34

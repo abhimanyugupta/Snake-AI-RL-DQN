@@ -1810,7 +1810,7 @@ class SnakeGameAI(SnakeLogicEnv):
         )
         value_span = max(1e-6, max_value - min_value)
 
-        tick_count = 4
+        tick_count = max(1, min(4, plot_rect.height // 25))
         for tick in range(tick_count + 1):
             ratio = tick / tick_count
             y = plot_rect.bottom - int(ratio * plot_rect.height)
