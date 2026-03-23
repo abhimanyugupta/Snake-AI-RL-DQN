@@ -936,9 +936,9 @@ class SnakeGameAI(SnakeLogicEnv):
 
         bulk_card = data.get("decision_card_mode") == "bulk"
         if bulk_card:
-            q_h = max(174, min(220, int(right_content.height * 0.38)))
+            q_h = max(184, min(240, int(right_content.height * 0.38)))
         else:
-            q_h = max(146, min(176, int(right_content.height * 0.30)))
+            q_h = max(192, min(220, int(right_content.height * 0.35)))
         q_rect = pygame.Rect(right_content.x, right_content.y, right_content.width, q_h)
         if data.get("q_values") is not None:
             self._draw_q_values(q_rect, data)
@@ -998,7 +998,6 @@ class SnakeGameAI(SnakeLogicEnv):
                 loss_rect_data["h"],
             )
             self._draw_loss_graph(loss_rect, data)
-            self._draw_inline_toggles(data.get("graph_toggles", []))
 
     def _draw_inline_toggles(self, toggles):
         for toggle in toggles or []:

@@ -131,17 +131,23 @@ class TextInputControl:
 
     def get_int(self, default=1, minimum=1, maximum=999999):
         raw_value = self.text.strip()
-        if raw_value:
-            value = int(raw_value)
-        elif self.last_valid_value.strip():
-            value = int(self.last_valid_value)
-        else:
+        try:
+            if raw_value:
+                value = int(raw_value)
+            elif hasattr(self, 'last_valid_value') and self.last_valid_value.strip():
+                value = int(self.last_valid_value)
+            else:
+                value = default
+        except ValueError:
             value = default
 
-        value = max(minimum, min(maximum, value))
-        self.last_valid_value = str(value)
-        self.text = str(value)
-        return value
+        clamped_value = max(minimum, min(maximum, value))
+        
+        if not self.active:
+            self.last_valid_value = str(clamped_value)
+            self.text = str(clamped_value)
+            
+        return clamped_value
 
     def draw_data(self):
         return {
@@ -212,26 +218,22 @@ class TrainingDashboard:
         dock_padding = 18
         dock_gap = 12
         dock_y = game.board_h + 14
-        dock_h = max(138, game.logical_h - dock_y - 16)
+        dock_h = max(340, game.logical_h - dock_y - 16)
         dock_w = max(260, game.board_w - dock_padding * 2)
-        dock_control_w = min(276, max(236, int(dock_w * 0.42)))
+        dock_control_h = 176
+        
         self.bottom_dock_rect = pygame.Rect(dock_padding, dock_y, dock_w, dock_h)
-        self.bottom_control_rect = pygame.Rect(dock_padding, dock_y, dock_control_w, dock_h)
+        self.bottom_control_rect = pygame.Rect(dock_padding, dock_y, dock_w, dock_control_h)
         self.bottom_loss_rect = pygame.Rect(
-            self.bottom_control_rect.right + dock_gap,
-            dock_y,
-            dock_w - dock_control_w - dock_gap,
-            dock_h,
+            dock_padding,
+            self.bottom_control_rect.bottom + dock_gap,
+            dock_w,
+            dock_h - dock_control_h - dock_gap,
         )
         dock_inner_x = self.bottom_control_rect.x + 12
         dock_inner_w = self.bottom_control_rect.width - 24
         dock_col_w = (dock_inner_w - 10) // 2
         dock_row_y = self.bottom_control_rect.y + 18
-        loss_inner_x = self.bottom_loss_rect.x + 12
-        loss_inner_w = self.bottom_loss_rect.width - 24
-        loss_toggle_gap = 6
-        loss_toggle_w = max(84, (loss_inner_w - loss_toggle_gap * 2) // 3)
-        loss_toggle_y = self.bottom_loss_rect.y + 34
 
         self.view_mode = "overview"
         self.view_order = ["overview", "network", "algorithm"]
@@ -263,6 +265,12 @@ class TrainingDashboard:
         speed_ratio = self._speed_ratio_from_settings(initial_speed, initial_delay_ms)
         self.speed_slider = SliderControl("Training speed", 0.0, 1.0, speed_ratio, col_x, y, slider_width)
         y += 40
+        
+        loss_btn_w = (slider_width - 12) // 3
+        self.show_scores_toggle = ToggleControl("Scores [S]", True, col_x, y, loss_btn_w, 24)
+        self.show_avg_toggle = ToggleControl("Avg [M]", True, col_x + loss_btn_w + 6, y, loss_btn_w, 24)
+        self.show_best_toggle = ToggleControl("Best [B]", True, col_x + (loss_btn_w + 6) * 2, y, loss_btn_w, 24)
+        y += 32
         
         y += 18
         self.food_reward_slider = SliderControl(
@@ -354,31 +362,6 @@ class TrainingDashboard:
         self.single_trainer_button = ButtonControl("Single [J]", dock_inner_x, dock_row_y, dock_col_w, 22, "trainer_single")
         self.parallel_trainer_button = ButtonControl("Parallel [P]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 22, "trainer_parallel")
         y += 32
-
-        self.show_scores_toggle = ToggleControl(
-            "Scores [S]",
-            True,
-            loss_inner_x,
-            loss_toggle_y,
-            loss_toggle_w,
-            24,
-        )
-        self.show_avg_toggle = ToggleControl(
-            "Avg [M]",
-            True,
-            loss_inner_x + loss_toggle_w + loss_toggle_gap,
-            loss_toggle_y,
-            loss_toggle_w,
-            24,
-        )
-        self.show_best_toggle = ToggleControl(
-            "Best [B]",
-            True,
-            loss_inner_x + (loss_toggle_w + loss_toggle_gap) * 2,
-            loss_toggle_y,
-            loss_toggle_w,
-            24,
-        )
 
         self.sliders = [
             self.speed_slider,
@@ -1134,11 +1117,6 @@ class TrainingDashboard:
         algorithm_sections = self._build_algorithm_sections(agent, action_info, context)
         control_sections = self._build_control_sections()
         bottom_dock = self._build_bottom_dock_layout()
-        graph_toggles = [
-            self.show_scores_toggle.draw_data(),
-            self.show_avg_toggle.draw_data(),
-            self.show_best_toggle.draw_data(),
-        ]
         board_mode = "parallel_bulk" if parallel_bulk_mode else "snake"
         board_panel = {}
         if parallel_bulk_mode:
@@ -1177,11 +1155,6 @@ class TrainingDashboard:
                 toggle.draw_data()
                 for toggle in self.toggles
                 if (self.started or toggle is not self.pause_toggle)
-                and toggle not in (
-                    self.show_scores_toggle,
-                    self.show_avg_toggle,
-                    self.show_best_toggle,
-                )
             ],
             "inputs": [input_control.draw_data() for input_control in self.inputs],
             "show_arrows": self.show_arrows_toggle.value,
@@ -1208,7 +1181,6 @@ class TrainingDashboard:
             "control_sections": control_sections,
             "bottom_dock": bottom_dock,
             "loss_graph_series": loss_graph_series,
-            "graph_toggles": graph_toggles,
             "results_ready": self.results_ready,
             "results_score_series": results_score_series,
             "results_loss_series": results_loss_series,

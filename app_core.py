@@ -1866,7 +1866,7 @@ def train_session(
     initial_reward_config = checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG)
     deep_history = checkpoint_state.get("deep_history", deep_history)
 
-    game = SnakeGameAI(w=640, h=700, window_h=880, render=render, speed=speed)
+    game = SnakeGameAI(w=480, h=480, window_h=880, render=render, speed=speed)
     dashboard = TrainingDashboard(
         game,
         initial_speed=speed,
@@ -2352,7 +2352,7 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
     deep_history = checkpoint_state.get("deep_history", histories.get("deep", {}))
     baseline_history = histories.get("tabular", {})
 
-    game = SnakeGameAI(w=640, h=700, window_h=880, render=True, speed=speed)
+    game = SnakeGameAI(w=480, h=480, window_h=880, render=True, speed=speed)
     dashboard = TrainingDashboard(
         game,
         initial_speed=speed,
