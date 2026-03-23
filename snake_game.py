@@ -1,6 +1,7 @@
 import math
 import os
 import random
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
@@ -27,6 +28,51 @@ class Direction(Enum):
 class Point:
     x: int
     y: int
+
+
+LOOP_WINDOW_SIZE = 24
+LOOP_REPEAT_THRESHOLD = 3
+LOOP_REPEAT_PENALTY = -0.25
+
+
+def _food_distance_for_env(env):
+    if env.food is None:
+        return 0
+    return abs(env.head.x - env.food.x) + abs(env.head.y - env.food.y)
+
+
+def _reset_loop_tracking_state(env):
+    env._loop_signatures = deque(maxlen=LOOP_WINDOW_SIZE)
+    env._loop_signature_counts = {}
+    env._last_food_distance = _food_distance_for_env(env)
+
+
+def _append_loop_signature(env, signature):
+    if len(env._loop_signatures) == env._loop_signatures.maxlen:
+        oldest = env._loop_signatures.popleft()
+        remaining = env._loop_signature_counts.get(oldest, 0) - 1
+        if remaining > 0:
+            env._loop_signature_counts[oldest] = remaining
+        else:
+            env._loop_signature_counts.pop(oldest, None)
+
+    env._loop_signatures.append(signature)
+    env._loop_signature_counts[signature] = env._loop_signature_counts.get(signature, 0) + 1
+
+
+def _maybe_apply_loop_penalty(env):
+    current_distance = _food_distance_for_env(env)
+    previous_distance = getattr(env, "_last_food_distance", current_distance)
+    food_progress = current_distance < previous_distance
+    food = env.food or Point(-1, -1)
+    signature = (env.head.x, env.head.y, env.direction.value, food.x, food.y)
+    _append_loop_signature(env, signature)
+    env._last_food_distance = current_distance
+    if food_progress:
+        return 0.0
+    if env._loop_signature_counts.get(signature, 0) >= LOOP_REPEAT_THRESHOLD:
+        return LOOP_REPEAT_PENALTY
+    return 0.0
 
 
 def get_available_display_area():
@@ -116,6 +162,7 @@ class SnakeLogicEnv:
         self.food = None
         self.frame_iteration = 0
         self._place_food()
+        _reset_loop_tracking_state(self)
 
     def set_dashboard_data(self, data):
         self.dashboard_data = dict(data or {})
@@ -182,9 +229,11 @@ class SnakeLogicEnv:
             self.score += 1
             reward = self.reward_config["food"]
             self._place_food()
+            _reset_loop_tracking_state(self)
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
+            reward += _maybe_apply_loop_penalty(self)
 
         if self.render and draw_frame:
             self.draw()
@@ -383,6 +432,7 @@ class SnakeGameAI(SnakeLogicEnv):
         self.food = None
         self.frame_iteration = 0
         self._place_food()
+        _reset_loop_tracking_state(self)
 
     def set_dashboard_data(self, data):
         self.dashboard_data = dict(data or {})
@@ -463,9 +513,11 @@ class SnakeGameAI(SnakeLogicEnv):
             self.score += 1
             reward = self.reward_config["food"]
             self._place_food()
+            _reset_loop_tracking_state(self)
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
+            reward += _maybe_apply_loop_penalty(self)
 
         if self.render and draw_frame:
             self._draw_scene()

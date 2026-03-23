@@ -18,6 +18,9 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - `Parallel` is the speed or throughput path
 - fresh CUDA sessions now default to `GPU + Parallel`
 - fresh CPU-only sessions still default to `CPU + Single`
+- training now supports `Q` as an early-finish hotkey that still lands in results and replays
+- the stall threshold now defaults to `150` and is intended to be editable from the lower dock
+- repeated spin-loop behavior now gets a small soft penalty instead of only timing out
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -47,6 +50,9 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - `default_trainer_mode_for_device(\"cuda\") -> \"parallel\"`
   - `default_trainer_mode_for_device(\"cpu\") -> \"single\"`
 - verified CLI help no longer shows `--no-render`
+- verified the new loop-penalty helper smoke: repeated identical movement signatures trigger the extra penalty
+- verified the new stall-threshold input default resolves to `150`
+- verified checkpoint save/load now persists the stall threshold in `trainer_config`
 
 ## Latest UI fixes
 
@@ -56,11 +62,20 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - missing transition data no longer crashes the finished-state algorithm page
 - added hybrid plateau recovery to the DQN:
   - baseline epsilon still decays episode by episode
-  - when training stalls for `250` completed runs, epsilon reheats to at least `0.12`
+  - fresh sessions now default the stall threshold to `150`, and the lower dock can change it live
+  - when training stalls for the current threshold, epsilon reheats to at least `0.12`
   - reheats decay back down with the existing decay factor
   - reheats respect a `150`-episode cooldown
   - reheat state is checkpointed and restored on resume
   - the snapshot and results views now show exploration mode, stall progress, reheats, and cooldown
+- single-mode sessions can now be finished early with `Q`:
+  - the current partial run is discarded
+  - the session still lands in post-run results
+  - the newest 3 completed replays remain available
+- added a soft anti-spin penalty in both snake environments:
+  - repeated `(head, direction, food)` signatures inside a short window subtract a small extra reward
+  - food pickups reset the loop detector
+- the lower dock now carries a `Stall threshold` entry box without shifting the main sidebar layout
 - parallel bulk mode no longer pretends the left board is one live run
   - the board now switches to an aggregate `Parallel Bulk Training` status panel
   - the snapshot card now uses `Completed runs` instead of a misleading live-run counter

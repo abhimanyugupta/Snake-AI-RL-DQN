@@ -101,6 +101,7 @@ class TextInputControl:
     def __init__(self, label, value, x, y, width, height, max_length=6):
         self.label = label
         self.text = str(value)
+        self.last_valid_value = str(value)
         self.rect = pygame.Rect(x, y, width, height)
         self.max_length = max_length
         self.active = False
@@ -130,11 +131,17 @@ class TextInputControl:
 
     def get_int(self, default=1, minimum=1, maximum=999999):
         raw_value = self.text.strip()
-        if not raw_value:
-            return max(minimum, min(maximum, default))
+        if raw_value:
+            value = int(raw_value)
+        elif self.last_valid_value.strip():
+            value = int(self.last_valid_value)
+        else:
+            value = default
 
-        value = int(raw_value)
-        return max(minimum, min(maximum, value))
+        value = max(minimum, min(maximum, value))
+        self.last_valid_value = str(value)
+        self.text = str(value)
+        return value
 
     def draw_data(self):
         return {
@@ -187,6 +194,7 @@ class TrainingDashboard:
         initial_fast_mode=False,
         initial_trainer_mode="single",
         initial_parallel_envs=8,
+        initial_stall_threshold=150,
     ):
         initial_reward_config = initial_reward_config or {
             "food": 10.0,
@@ -218,7 +226,7 @@ class TrainingDashboard:
         dock_inner_x = self.bottom_control_rect.x + 12
         dock_inner_w = self.bottom_control_rect.width - 24
         dock_col_w = (dock_inner_w - 10) // 2
-        dock_row_y = self.bottom_control_rect.y + 22
+        dock_row_y = self.bottom_control_rect.y + 18
         loss_inner_x = self.bottom_loss_rect.x + 12
         loss_inner_w = self.bottom_loss_rect.width - 24
         loss_toggle_gap = 6
@@ -305,7 +313,7 @@ class TrainingDashboard:
             dock_inner_x,
             dock_row_y,
             dock_col_w,
-            28,
+            26,
         )
         self.parallel_env_input = TextInputControl(
             "Parallel envs",
@@ -313,29 +321,38 @@ class TrainingDashboard:
             dock_inner_x + dock_col_w + 10,
             dock_row_y,
             dock_col_w,
-            28,
+            26,
+        )
+        self.stall_threshold_input = TextInputControl(
+            "Stall threshold",
+            initial_stall_threshold,
+            dock_inner_x,
+            dock_row_y + 50,
+            dock_inner_w,
+            22,
+            max_length=4,
         )
         y += 32
 
-        dock_row_y += 34
+        dock_row_y += 78
         self.fast_mode_toggle = ToggleControl(
             "Fast Mode [X]",
             bool(initial_fast_mode),
             dock_inner_x,
             dock_row_y,
             dock_inner_w,
-            26,
+            22,
         )
         y += 32
 
-        dock_row_y += 30
-        self.cpu_device_button = ButtonControl("CPU [C]", dock_inner_x, dock_row_y, dock_col_w, 26, "device_cpu")
-        self.gpu_device_button = ButtonControl("GPU [U]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 26, "device_cuda")
+        dock_row_y += 26
+        self.cpu_device_button = ButtonControl("CPU [C]", dock_inner_x, dock_row_y, dock_col_w, 22, "device_cpu")
+        self.gpu_device_button = ButtonControl("GPU [U]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 22, "device_cuda")
         y += 32
 
-        dock_row_y += 30
-        self.single_trainer_button = ButtonControl("Single [J]", dock_inner_x, dock_row_y, dock_col_w, 26, "trainer_single")
-        self.parallel_trainer_button = ButtonControl("Parallel [P]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 26, "trainer_parallel")
+        dock_row_y += 26
+        self.single_trainer_button = ButtonControl("Single [J]", dock_inner_x, dock_row_y, dock_col_w, 22, "trainer_single")
+        self.parallel_trainer_button = ButtonControl("Parallel [P]", dock_inner_x + dock_col_w + 10, dock_row_y, dock_col_w, 22, "trainer_parallel")
         y += 32
 
         self.show_scores_toggle = ToggleControl(
@@ -381,7 +398,7 @@ class TrainingDashboard:
             self.show_avg_toggle,
             self.show_best_toggle,
         ]
-        self.inputs = [self.episode_input, self.parallel_env_input]
+        self.inputs = [self.episode_input, self.parallel_env_input, self.stall_threshold_input]
         self.control_buttons = [
             self.start_button,
             self.cpu_device_button,
@@ -392,6 +409,7 @@ class TrainingDashboard:
 
         self.initial_episode_goal = initial_episode_goal
         self.initial_parallel_envs = max(1, int(initial_parallel_envs))
+        self.initial_stall_threshold = max(1, int(initial_stall_threshold))
         self.last_reward = 0.0
         self.deep_scores = []
         self.deep_average_history = []
@@ -462,6 +480,13 @@ class TrainingDashboard:
 
     def get_parallel_env_count(self):
         return self.parallel_env_input.get_int(default=self.initial_parallel_envs, minimum=1, maximum=256)
+
+    def get_stall_threshold(self):
+        return self.stall_threshold_input.get_int(
+            default=self.initial_stall_threshold,
+            minimum=1,
+            maximum=9999,
+        )
 
     def available_view_order(self):
         order = ["overview", "network", "algorithm"]

@@ -82,6 +82,8 @@ Notes:
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
 - if `--parallel-envs` is omitted, parallel mode now defaults to `64` on CUDA and `16` on CPU
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
+- the default stall threshold is now `150`, and the GUI exposes it as an editable lower-dock input
+- repeated spin-loop behavior now gets a small automatic penalty so the snake is nudged away from cycling in place
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
 - when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card explains when replay is unavailable and what will be captured next
@@ -114,6 +116,7 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 - `U` select GPU or CUDA training or viewing when CUDA is available
 - `J` select the single learn or inspection trainer before starting
 - `P` select the parallel speed or throughput trainer before starting
+- `Q` finish the current training session early and jump to the results or replay screen
 - `X` toggle Fast Mode for training sessions
 - `A` toggle action arrows
 - `D` toggle danger overlays
@@ -130,6 +133,8 @@ Rendered training sessions now wait for an on-screen `Start` button, so you can 
 Rendered training sessions also let you choose `Single [J]` or `Parallel [P]` before start.
 `Fast Mode [X]` is the single-mode shortcut for hidden training plus post-run replay of the newest 3 runs.
 After a fast-mode session completes, the finish overlay and `Overview` sidebar can replay the last 3 recorded runs without keeping older episode replays in memory.
+`Q` is the quickest way to stop a flat run and still land in the same results screen with the latest 3 captured replays.
+The lower dock now includes a `Stall threshold` input that controls when epsilon reheats during plateau recovery; fresh sessions default it to `150`.
 The overview also shows lightweight throughput feedback during training, including episode steps, environment steps per second, and optimizer updates per second.
 In parallel mode, bulk training uses multiple Snake environments and the `Network` / `Algorithm` pages switch to placeholders until the final rendered evaluation tail begins.
 The score-series toggles now live in the lower dock near the loss chart, which keeps them visible on shorter windows.

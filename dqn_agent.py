@@ -25,6 +25,7 @@ from snake_game import Direction, Point
 DEFAULT_HIDDEN_LAYERS = [256, 256, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
+DEFAULT_STALL_THRESHOLD = 150
 
 
 def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
@@ -335,7 +336,7 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         self.base_epsilon = float(epsilon)
         self.reheat_epsilon = 0.12
-        self.reheat_patience = 250
+        self.reheat_patience = DEFAULT_STALL_THRESHOLD
         self.reheat_cooldown = 150
         self.reheat_avg_margin = 0.5
         self.reheat_active_epsilon: float | None = None
@@ -427,6 +428,10 @@ class DQNAgent:
         if trainer_mode is not None:
             self.last_train_info["trainer_mode"] = str(trainer_mode)
         self.last_train_info["batch_size"] = int(self.batch_size)
+
+    def set_reheat_patience(self, patience: int) -> int:
+        self.reheat_patience = max(1, int(patience))
+        return self.reheat_patience
 
     def set_device(self, device_preference: str) -> bool:
         normalized = normalize_device_preference(device_preference)

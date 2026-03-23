@@ -410,6 +410,7 @@ def save_checkpoint(
             "mode": str(trainer_mode or DEFAULT_TRAINER_MODE).strip().lower(),
             "parallel_envs": int(max(1, parallel_envs)),
             "eval_tail_episodes": int(max(1, eval_tail_episodes)),
+            "stall_threshold": int(max(1, dashboard.get_stall_threshold())),
         },
     }
     agent.save(checkpoint_path, extra_state=extra_state)
@@ -809,7 +810,11 @@ def clone_dashboard_state(target_dashboard, source_dashboard):
     target_dashboard.selected_trainer_mode = source_dashboard.selected_trainer_mode
     target_dashboard.fast_mode_toggle.value = source_dashboard.fast_mode_toggle.value
     target_dashboard.episode_input.text = source_dashboard.episode_input.text
+    target_dashboard.episode_input.last_valid_value = source_dashboard.episode_input.last_valid_value
     target_dashboard.parallel_env_input.text = source_dashboard.parallel_env_input.text
+    target_dashboard.parallel_env_input.last_valid_value = source_dashboard.parallel_env_input.last_valid_value
+    target_dashboard.stall_threshold_input.text = source_dashboard.stall_threshold_input.text
+    target_dashboard.stall_threshold_input.last_valid_value = source_dashboard.stall_threshold_input.last_valid_value
     target_dashboard.graph_view_end = source_dashboard.graph_view_end
     target_dashboard.graph_view_size = source_dashboard.graph_view_size
     target_dashboard.pending_trainer_mode = None
@@ -891,6 +896,7 @@ def create_post_run_results_window(
         initial_fast_mode=source_dashboard.fast_mode_toggle.value,
         initial_trainer_mode=trainer_mode,
         initial_parallel_envs=parallel_envs,
+        initial_stall_threshold=source_dashboard.get_stall_threshold(),
     )
     clone_dashboard_state(results_dashboard, source_dashboard)
     return results_game, results_dashboard
@@ -986,6 +992,13 @@ def apply_pending_trainer_mode_switch(agent, dashboard):
     configure_agent_for_mode(agent, next_mode)
     print(f"Queued trainer-mode switch applied: {next_mode}")
     return next_mode
+
+
+def finish_session_requested(events):
+    for event in events or []:
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
+            return True
+    return False
 
 
 def ensure_baseline_history(
@@ -1115,6 +1128,7 @@ def await_training_start(
         if game.quit_requested:
             break
 
+        agent.set_reheat_patience(dashboard.get_stall_threshold())
         selected_mode = dashboard.selected_trainer_mode
         if sync_agent_device_from_dashboard(agent, dashboard, "training lobby"):
             configure_agent_for_mode(agent, selected_mode)
@@ -1219,6 +1233,7 @@ def train_parallel_mode(
     last_frame_time = 0.0
     bulk_iteration = 0
     completed_since_print = 0
+    finish_requested = False
 
     def completed_in_session():
         return max(0, agent.n_games - session_start_games)
@@ -1294,10 +1309,15 @@ def train_parallel_mode(
             dashboard.sync_graph_rect(game)
             dashboard.handle_events(scaled_events)
             game.handle_system_events(events)
+            if finish_session_requested(scaled_events):
+                finish_requested = True
 
         if game.quit_requested:
             break
+        if finish_requested:
+            break
 
+        agent.set_reheat_patience(dashboard.get_stall_threshold())
         if sync_agent_device_from_dashboard(agent, dashboard, "parallel training"):
             configure_agent_for_mode(agent, "parallel")
 
@@ -1392,6 +1412,8 @@ def train_parallel_mode(
                     dashboard.sync_graph_rect(game)
                     dashboard.handle_events(pending_scaled_events)
                     game.handle_system_events(pending_events)
+                    if finish_session_requested(pending_scaled_events):
+                        finish_requested = True
                     if game.quit_requested:
                         break
                     if pending_scaled_events:
@@ -1520,11 +1542,15 @@ def train_parallel_mode(
         if switched_mode:
             flush_metric_buffer(metrics_log_path, pending_metric_entries)
             return best_score, last_transition, False, switched_mode
+        if finish_requested:
+            break
 
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
 
     if game.quit_requested:
         return best_score, last_transition, False, "parallel"
+    if finish_requested:
+        return best_score, last_transition, True, "parallel"
 
     remaining_goal = max(0, dashboard.get_episode_goal() - completed_in_session())
     eval_runs = min(eval_tail_episodes, remaining_goal) if should_run_eval_tail() else 0
@@ -1548,10 +1574,15 @@ def train_parallel_mode(
                 dashboard.sync_graph_rect(game)
                 dashboard.handle_events(scaled_events)
                 game.handle_system_events(events)
+                if finish_session_requested(scaled_events):
+                    finish_requested = True
 
             if game.quit_requested:
                 break
+            if finish_requested:
+                break
 
+            agent.set_reheat_patience(dashboard.get_stall_threshold())
             if sync_agent_device_from_dashboard(agent, dashboard, "parallel evaluation"):
                 configure_agent_for_mode(agent, "parallel")
             game.speed = dashboard.current_fps
@@ -1711,6 +1742,8 @@ def train_parallel_mode(
 
         if game.quit_requested:
             break
+        if finish_requested:
+            break
 
         agent.n_games += 1
         dashboard.record_deep_episode(
@@ -1769,6 +1802,8 @@ def train_parallel_mode(
             return best_score, last_transition, False, switched_mode
 
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
+    if finish_requested and not game.quit_requested:
+        return best_score, last_transition, True, "parallel"
     return best_score, last_transition, not game.quit_requested, "parallel"
 
 
@@ -1821,6 +1856,13 @@ def train_session(
         "eval_tail_episodes",
         3,
     )
+    resolved_stall_threshold = resolve_positive_session_int(
+        checkpoint_state,
+        resume,
+        None,
+        "stall_threshold",
+        agent.reheat_patience,
+    )
     initial_reward_config = checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG)
     deep_history = checkpoint_state.get("deep_history", deep_history)
 
@@ -1837,7 +1879,9 @@ def train_session(
         initial_fast_mode=fast_mode,
         initial_trainer_mode=resolved_trainer_mode,
         initial_parallel_envs=resolved_parallel_envs,
+        initial_stall_threshold=resolved_stall_threshold,
     )
+    agent.set_reheat_patience(resolved_stall_threshold)
     dashboard.load_deep_history(deep_history)
     dashboard.set_baseline_visibility(
         bool(comparison_mode and not fast_mode and resolved_trainer_mode == "single")
@@ -1857,6 +1901,7 @@ def train_session(
         "env_steps": 0,
         "updates": 0,
     }
+    finish_requested = False
 
     try:
         active_trainer_mode = await_training_start(
@@ -1926,14 +1971,13 @@ def train_session(
             episodes_remaining = max(0, current_goal - completed_in_session)
             current_game_number = completed_in_session + 1
             stripped_episode = bool(episode_fast_mode)
-            replay_capture_episode = episodes_remaining <= 3
 
             game.reset()
             state = agent.encode_state(game)
             step_count = 0
             episode_reward = 0.0
             episode_replay_frames = []
-            capture_episode_replay = bool(replay_capture_episode)
+            capture_episode_replay = True
 
             def current_recent_replays_panel(training_completed=False):
                 return build_recent_replays_panel(
@@ -1989,7 +2033,12 @@ def train_session(
 
                 if game.quit_requested:
                     break
+                if dashboard.started and finish_session_requested(scaled_events):
+                    finish_requested = True
+                if finish_requested:
+                    break
 
+                agent.set_reheat_patience(dashboard.get_stall_threshold())
                 sync_agent_device_from_dashboard(agent, dashboard, "training")
                 game.speed = dashboard.current_fps
                 game.set_reward_config(dashboard.reward_config)
@@ -2054,7 +2103,20 @@ def train_session(
                     "Fast mode" if episode_fast_mode else "Training"
                 )
 
-                if live_render_enabled or capture_episode_replay:
+                if capture_episode_replay:
+                    episode_replay_frames.append(
+                        capture_replay_frame(
+                            game,
+                            state=state,
+                            action_info=action_info,
+                            current_game_number=current_game_number,
+                            episode_goal=episode_goal,
+                            best_score=best_score,
+                            context=live_context,
+                            show_baseline=episode_show_baseline,
+                        )
+                    )
+                if live_render_enabled:
                     frame_data = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
@@ -2069,25 +2131,11 @@ def train_session(
                         show_baseline=episode_show_baseline,
                         recent_replays_panel=current_recent_replays_panel(),
                     )
-                    if capture_episode_replay:
-                        episode_replay_frames.append(
-                            capture_replay_frame(
-                                game,
-                                state=state,
-                                action_info=action_info,
-                                current_game_number=current_game_number,
-                                episode_goal=episode_goal,
-                                best_score=best_score,
-                                context=live_context,
-                                show_baseline=episode_show_baseline,
-                            )
-                        )
-                    if live_render_enabled:
-                        game.set_dashboard_data(frame_data)
-                        if dashboard.should_draw_frame(step_count):
-                            game.draw()
-                            if dashboard.current_delay_ms > 0:
-                                pygame.time.delay(dashboard.current_delay_ms)
+                    game.set_dashboard_data(frame_data)
+                    if dashboard.should_draw_frame(step_count):
+                        game.draw()
+                        if dashboard.current_delay_ms > 0:
+                            pygame.time.delay(dashboard.current_delay_ms)
 
                 reward, game_over, score = game.play_step(
                     action_info["action"],
@@ -2184,6 +2232,10 @@ def train_session(
 
             if game.quit_requested:
                 print("Training stopped because the game window was closed.")
+                break
+            if finish_requested:
+                print("Training session finished early. Opening results and latest replays.")
+                training_completed = True
                 break
 
             agent.n_games += 1
