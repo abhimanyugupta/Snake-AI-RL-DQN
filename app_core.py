@@ -1098,7 +1098,7 @@ def resolve_parallel_batch_size(device_type):
 def resolve_parallel_env_count(device_type, requested_envs):
     if requested_envs is not None:
         return max(1, int(requested_envs))
-    return 64 if str(device_type) == "cuda" else 16
+    return 32 if str(device_type) == "cuda" else 16
 
 
 def configure_agent_for_mode(agent, trainer_mode):
@@ -1106,7 +1106,7 @@ def configure_agent_for_mode(agent, trainer_mode):
     if trainer_mode == "parallel":
         agent.configure_training_schedule(
             batch_size=resolve_parallel_batch_size(agent.device.type),
-            warmup_size=10_000,
+            warmup_size=4_096,
             target_sync_interval=250,
             update_every_transitions=32,
             gradient_steps_per_update=2,
@@ -1447,8 +1447,8 @@ def train_parallel_mode(
             episode_steps[env_index] += 1
             rewards_batch[env_index] = float(reward)
             dones_batch[env_index] = float(game_over)
-            agent.encode_state(env, out=next_states_batch[env_index])
             if game_over:
+                next_states_batch[env_index].fill(0.0)
                 completed_records.append(
                     {
                         "env_index": env_index,
@@ -1458,6 +1458,8 @@ def train_parallel_mode(
                         "final_reward": float(reward),
                     }
                 )
+            else:
+                agent.encode_state(env, out=next_states_batch[env_index])
 
             if (
                 game.render

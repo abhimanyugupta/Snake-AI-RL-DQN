@@ -26,6 +26,10 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - non-terminal moves now get a small Manhattan-distance shaping term so the reward is denser when the snake moves toward food
 - the trainer now uses Double DQN target selection instead of the older plain DQN target
 - the trainer now uses hybrid replay instead of pure prioritized replay
+- the DQN state encoder now uses 30 features instead of the older 18-feature schema
+- resume or visualizer loads now reject old 18-feature checkpoints with a clear schema-mismatch error
+- parallel mode now defaults to `32` envs on CUDA instead of `64`
+- parallel warmup is now `4096` instead of `10000` so CUDA updates start earlier
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -77,6 +81,14 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - mixes `70%` uniform samples with `30%` prioritized samples
   - updates priorities from absolute TD error
   - falls back safely when older checkpoints do not contain priority data
+- verified in-sandbox that the 30-feature state upgrade compiles cleanly
+- verified with a local encoder smoke that:
+  - `encode_state(...)` now returns 30 values
+  - the new projected-move features stay normalized inside `[0, 1]`
+  - old 18-feature checkpoints now fail with a clear state-schema mismatch
+- verified in-sandbox that:
+  - `resolve_parallel_env_count('cuda', None) -> 32`
+  - parallel-mode warmup now resolves to `4096`
 
 ## Latest UI fixes
 
@@ -114,6 +126,20 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - replay capacity now defaults to `200000`
   - parallel mode now uses `warmup_size = 10000` and `batch_size = 512`
   - old checkpoints without replay priorities still load with safe default priorities
+- upgraded the state encoder from 18 to 30 features:
+  - the original 18 local features remain in the same order
+  - each relative move (`straight`, `right`, `left`) now adds:
+    - reachable area ratio after the projected move
+    - tail reachability after the projected move
+    - normalized count of open legal exits after the projected move
+    - normalized Manhattan distance to food after the projected move
+  - checkpoint metadata now includes `state_schema_version`
+  - old 18-feature checkpoints are intentionally incompatible with new training runs
+- reduced the worst startup latency for the heavier 30-feature encoder:
+  - parallel CUDA default env count is now `32`
+  - parallel warmup is now `4096`
+  - terminal envs now skip expensive next-state encoding because terminal next-states are zeroed out anyway
+  - projected move encoding now reuses precomputed body/tail keys instead of rebuilding as much per move
 - the lower dock now carries a `Stall threshold` entry box without shifting the main sidebar layout
 - parallel bulk mode no longer pretends the left board is one live run
   - the board now switches to an aggregate `Parallel Bulk Training` status panel

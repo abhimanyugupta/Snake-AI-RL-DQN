@@ -15,7 +15,7 @@ That lets the agent learn patterns across similar states instead of only memoriz
 ## What the Deep RL agent sees
 
 The DQN in this project uses a richer feature vector than the tabular version.
-It includes:
+It now includes 30 inputs:
 
 - danger straight / right / left
 - current direction
@@ -24,12 +24,17 @@ It includes:
 - free space straight / right / left
 - normalized snake length
 - normalized distance to the food
+- for each relative move (`straight`, `right`, `left`):
+  - reachable area ratio after the move
+  - whether the projected head can still reach the tail
+  - how many legal exits remain after the move
+  - the next-step Manhattan distance to the food
 
 ## The loop
 
 Each step of training does this:
 
-1. observe the current state
+1. observe the current state, including projected move-safety features
 2. choose an action
 3. play that action in the game
 4. get reward and next state

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from typing import Iterable, List, Sequence
 
 try:
@@ -33,6 +34,9 @@ DEFAULT_PRIORITY_BETA_END = 0.8
 DEFAULT_PRIORITY_BETA_INCREMENT = 5e-5
 DEFAULT_PRIORITY_EPSILON = 1e-5
 DEFAULT_HYBRID_PRIORITIZED_FRACTION = 0.3
+LEGACY_STATE_SIZE = 18
+LEGACY_STATE_SCHEMA_VERSION = 1
+CURRENT_STATE_SCHEMA_VERSION = 2
 
 
 def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
@@ -88,12 +92,41 @@ def extract_hidden_layers_from_checkpoint(checkpoint: dict) -> List[int]:
     return normalize_hidden_layers(hidden_layers)
 
 
+def extract_state_schema_from_checkpoint(checkpoint: dict) -> tuple[int, int]:
+    network_config = checkpoint.get("network_config", {})
+    input_size = int(network_config.get("input_size", LEGACY_STATE_SIZE))
+    state_schema_version = int(
+        network_config.get("state_schema_version", LEGACY_STATE_SCHEMA_VERSION)
+    )
+    return state_schema_version, input_size
+
+
+def validate_checkpoint_state_schema(checkpoint: dict) -> tuple[int, int]:
+    state_schema_version, input_size = extract_state_schema_from_checkpoint(checkpoint)
+    expected_schema_version = CURRENT_STATE_SCHEMA_VERSION
+    expected_input_size = len(DQNAgent.STATE_LABELS)
+    if (
+        int(state_schema_version) != int(expected_schema_version)
+        or int(input_size) != int(expected_input_size)
+    ):
+        raise ValueError(
+            "Checkpoint state schema mismatch: checkpoint uses "
+            f"schema v{state_schema_version} with input size {input_size}, but the "
+            "current agent expects "
+            f"schema v{expected_schema_version} with input size {expected_input_size}. "
+            "Start a fresh training run for the new 30-feature state encoder."
+        )
+    return int(state_schema_version), int(input_size)
+
+
 def load_checkpoint_network_config(path: str) -> dict:
     checkpoint = load_torch_checkpoint(path, map_location="cpu")
+    state_schema_version, input_size = validate_checkpoint_state_schema(checkpoint)
     hidden_layers = extract_hidden_layers_from_checkpoint(checkpoint)
     network_config = dict(checkpoint.get("network_config", {}))
     network_config["hidden_layers"] = hidden_layers
-    network_config.setdefault("input_size", len(DQNAgent.STATE_LABELS))
+    network_config["input_size"] = int(input_size)
+    network_config["state_schema_version"] = int(state_schema_version)
     network_config.setdefault("output_size", len(DQNAgent.ACTION_LABELS))
     return network_config
 
@@ -470,6 +503,18 @@ class DQNAgent:
         ("space_left", "Free space left", "Space L"),
         ("snake_length", "Snake length", "Length"),
         ("food_distance", "Food distance", "Distance"),
+        ("area_ratio_straight", "Reachable area straight", "Area S"),
+        ("tail_reachable_straight", "Tail reachable straight", "Tail S"),
+        ("open_neighbors_straight", "Open neighbors straight", "Open S"),
+        ("food_distance_next_straight", "Food distance next straight", "FoodNext S"),
+        ("area_ratio_right", "Reachable area right", "Area R"),
+        ("tail_reachable_right", "Tail reachable right", "Tail R"),
+        ("open_neighbors_right", "Open neighbors right", "Open R"),
+        ("food_distance_next_right", "Food distance next right", "FoodNext R"),
+        ("area_ratio_left", "Reachable area left", "Area L"),
+        ("tail_reachable_left", "Tail reachable left", "Tail L"),
+        ("open_neighbors_left", "Open neighbors left", "Open L"),
+        ("food_distance_next_left", "Food distance next left", "FoodNext L"),
     ]
 
     def __init__(
@@ -1141,6 +1186,7 @@ class DQNAgent:
                 "hidden_layers": list(self.hidden_layers),
                 "input_size": len(self.STATE_LABELS),
                 "output_size": len(self.ACTION_LABELS),
+                "state_schema_version": CURRENT_STATE_SCHEMA_VERSION,
             },
             "runtime_config": {
                 "device_preference": self.device_preference,
@@ -1173,6 +1219,7 @@ class DQNAgent:
 
     def load(self, path: str) -> dict:
         checkpoint = load_torch_checkpoint(path, map_location=self.device)
+        validate_checkpoint_state_schema(checkpoint)
         checkpoint_hidden_layers = extract_hidden_layers_from_checkpoint(checkpoint)
         if checkpoint_hidden_layers != self.hidden_layers:
             raise ValueError(
@@ -1255,6 +1302,13 @@ class DQNAgent:
         head = game.head
         block = game.block_size
         direction = game.direction
+        snake = game.snake
+        head_key = self._point_key(head)
+        snake_body_keys = {self._point_key(segment) for segment in game.snake_body_set}
+        tail_key = self._point_key(snake[-1]) if snake else head_key
+        projected_tail_if_vacated = (
+            self._point_key(snake[-2]) if len(snake) > 1 else head_key
+        )
 
         point_straight = self._next_point(head, direction, block)
         point_right = self._next_point(head, self._turn_right(direction), block)
@@ -1296,6 +1350,30 @@ class DQNAgent:
         target[17] = float(
             (abs(food_dx_cells) + abs(food_dy_cells)) / float(max_x_steps + max_y_steps)
         )
+        move_feature_offset = 18
+        for move_direction in (
+            direction,
+            self._turn_right(direction),
+            self._turn_left(direction),
+        ):
+            area_ratio, tail_reachable, open_neighbors, food_distance_next = (
+                self._projected_move_features(
+                    game,
+                    move_direction,
+                    head_key=head_key,
+                    snake_body_keys=snake_body_keys,
+                    tail_key=tail_key,
+                    projected_tail_if_vacated=projected_tail_if_vacated,
+                    total_cells=total_cells,
+                    max_x_steps=max_x_steps,
+                    max_y_steps=max_y_steps,
+                )
+            )
+            target[move_feature_offset] = float(area_ratio)
+            target[move_feature_offset + 1] = float(tail_reachable)
+            target[move_feature_offset + 2] = float(open_neighbors)
+            target[move_feature_offset + 3] = float(food_distance_next)
+            move_feature_offset += 4
         return target
 
     def encode_states(self, games, out: np.ndarray | None = None) -> np.ndarray:
@@ -1503,6 +1581,195 @@ class DQNAgent:
     ) -> float:
         steps = game.raycast_free_steps(start, direction)
         return float(steps / max_travel)
+
+    def _projected_move_features(
+        self,
+        game,
+        move_direction: Direction,
+        *,
+        head_key: tuple[int, int],
+        snake_body_keys: set[tuple[int, int]],
+        tail_key: tuple[int, int],
+        projected_tail_if_vacated: tuple[int, int],
+        total_cells: float,
+        max_x_steps: int,
+        max_y_steps: int,
+    ) -> tuple[float, float, float, float]:
+        head = game.head
+        block = game.block_size
+        next_head = self._next_point(head, move_direction, block)
+        next_head_key = self._point_key(next_head)
+
+        snake = list(game.snake)
+        if self._is_out_of_bounds(next_head, game.board_w, game.board_h):
+            return 0.0, 0.0, 0.0, 1.0
+
+        will_eat = bool(game.food is not None and next_head == game.food)
+        if next_head_key in snake_body_keys and (will_eat or next_head_key != tail_key):
+            return 0.0, 0.0, 0.0, 1.0
+
+        projected_occupied = set(snake_body_keys)
+        projected_occupied.add(head_key)
+        projected_length = len(game.snake) + (1 if will_eat else 0)
+        projected_tail_key = tail_key if will_eat else projected_tail_if_vacated
+        if not will_eat:
+            projected_occupied.discard(tail_key)
+
+        available_cells = max(
+            1.0,
+            float(total_cells) - float(projected_length) + 1.0,
+        )
+        flood_blocked = set(projected_occupied)
+        flood_blocked.discard(next_head_key)
+        reachable_count = self._flood_fill_reachable_count(
+            next_head_key,
+            blocked=flood_blocked,
+            board_w=game.board_w,
+            board_h=game.board_h,
+            block_size=block,
+        )
+        area_ratio = min(1.0, float(reachable_count) / float(available_cells))
+
+        tail_blocked = set(projected_occupied)
+        tail_blocked.discard(next_head_key)
+        tail_blocked.discard(projected_tail_key)
+        tail_reachable = float(
+            self._path_exists(
+                next_head_key,
+                projected_tail_key,
+                blocked=tail_blocked,
+                board_w=game.board_w,
+                board_h=game.board_h,
+                block_size=block,
+            )
+        )
+
+        open_neighbors = self._open_neighbors_ratio(
+            next_head,
+            move_direction,
+            projected_occupied,
+            board_w=game.board_w,
+            board_h=game.board_h,
+            block_size=block,
+        )
+        food_distance_next = self._food_distance_ratio(
+            next_head,
+            game.food,
+            max_x_steps=max_x_steps,
+            max_y_steps=max_y_steps,
+            block_size=block,
+        )
+        return area_ratio, tail_reachable, open_neighbors, food_distance_next
+
+    def _flood_fill_reachable_count(
+        self,
+        start_key: tuple[int, int],
+        *,
+        blocked: set[tuple[int, int]],
+        board_w: int,
+        board_h: int,
+        block_size: int,
+    ) -> int:
+        queue = deque([start_key])
+        visited = {start_key}
+        while queue:
+            current_key = queue.popleft()
+            current_point = Point(*current_key)
+            for neighbor in self._cardinal_neighbors(current_point, block_size):
+                neighbor_key = self._point_key(neighbor)
+                if neighbor_key in visited or neighbor_key in blocked:
+                    continue
+                if self._is_out_of_bounds(neighbor, board_w, board_h):
+                    continue
+                visited.add(neighbor_key)
+                queue.append(neighbor_key)
+        return len(visited)
+
+    def _path_exists(
+        self,
+        start_key: tuple[int, int],
+        target_key: tuple[int, int],
+        *,
+        blocked: set[tuple[int, int]],
+        board_w: int,
+        board_h: int,
+        block_size: int,
+    ) -> bool:
+        if start_key == target_key:
+            return True
+        queue = deque([start_key])
+        visited = {start_key}
+        while queue:
+            current_key = queue.popleft()
+            current_point = Point(*current_key)
+            for neighbor in self._cardinal_neighbors(current_point, block_size):
+                neighbor_key = self._point_key(neighbor)
+                if neighbor_key == target_key:
+                    return True
+                if neighbor_key in visited or neighbor_key in blocked:
+                    continue
+                if self._is_out_of_bounds(neighbor, board_w, board_h):
+                    continue
+                visited.add(neighbor_key)
+                queue.append(neighbor_key)
+        return False
+
+    def _open_neighbors_ratio(
+        self,
+        head: Point,
+        direction: Direction,
+        occupied: set[tuple[int, int]],
+        *,
+        board_w: int,
+        board_h: int,
+        block_size: int,
+    ) -> float:
+        legal_directions = (
+            direction,
+            self._turn_right(direction),
+            self._turn_left(direction),
+        )
+        open_count = 0
+        for next_direction in legal_directions:
+            neighbor = self._next_point(head, next_direction, block_size)
+            neighbor_key = self._point_key(neighbor)
+            if self._is_out_of_bounds(neighbor, board_w, board_h):
+                continue
+            if neighbor_key in occupied:
+                continue
+            open_count += 1
+        return float(open_count / 3.0)
+
+    def _food_distance_ratio(
+        self,
+        point: Point,
+        food: Point | None,
+        *,
+        max_x_steps: int,
+        max_y_steps: int,
+        block_size: int,
+    ) -> float:
+        if food is None:
+            return 0.0
+        max_distance = float(max(1, max_x_steps + max_y_steps))
+        distance_in_cells = (abs(food.x - point.x) + abs(food.y - point.y)) / float(
+            max(1, block_size)
+        )
+        return float(distance_in_cells / max_distance)
+
+    def _cardinal_neighbors(self, point: Point, block_size: int) -> tuple[Point, Point, Point, Point]:
+        return (
+            Point(point.x + block_size, point.y),
+            Point(point.x - block_size, point.y),
+            Point(point.x, point.y + block_size),
+            Point(point.x, point.y - block_size),
+        )
+
+    def _point_key(self, point: Point) -> tuple[int, int]:
+        return (int(point.x), int(point.y))
+
+    def _is_out_of_bounds(self, point: Point, board_w: int, board_h: int) -> bool:
+        return bool(point.x < 0 or point.x >= board_w or point.y < 0 or point.y >= board_h)
 
     def _next_point(self, head: Point, direction: Direction, block_size: int) -> Point:
         if direction == Direction.RIGHT:

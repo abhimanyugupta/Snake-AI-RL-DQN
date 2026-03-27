@@ -6,7 +6,7 @@ It also supports a separate **parallel training mode** for higher-throughput bul
 
 ## What this project shows
 
-- the richer 18-feature state vector seen by the DQN
+- the richer 30-feature state vector seen by the DQN
 - live action selection and Q-values
 - hybrid replay-memory driven training
 - Double-DQN target updates
@@ -71,6 +71,7 @@ Notes:
 - if you resume from a checkpoint, the checkpoint architecture is used automatically
 - if you explicitly pass `--hidden-layers` while resuming, it must match the checkpoint
 - older checkpoints without architecture metadata are treated as `128,128`
+- checkpoints trained with the older 18-feature state encoder are now intentionally rejected; start a fresh run for the 30-feature schema
 - `--device auto` uses CUDA when available, otherwise CPU
 - `--device cuda` fails clearly if CUDA is unavailable on your machine
 - fresh CUDA sessions default to `GPU + Parallel`, while CPU-only sessions default to `CPU + Single`
@@ -80,14 +81,15 @@ Notes:
 - `--trainer-mode parallel` is the speed or throughput path with batched workers
 - `--parallel-envs` controls how many Snake environments the parallel trainer steps at once
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
-- if `--parallel-envs` is omitted, parallel mode now defaults to `64` on CUDA and `16` on CPU
+- if `--parallel-envs` is omitted, parallel mode now defaults to `32` on CUDA and `16` on CPU
 - replay is now hybrid replay, mixing `70%` uniform samples with `30%` priority-weighted samples
 - replay capacity now defaults to `200000`
-- parallel mode now uses a larger warmup (`10000`) and a smaller batch size (`512`) to improve sample efficiency
+- parallel mode now uses a larger warmup (`4096`) and a batch size of `512` to improve sample efficiency without delaying GPU updates as long
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
 - the default stall threshold is now `150`, and the GUI exposes it as an editable lower-dock input
 - repeated spin-loop behavior now gets a small automatic penalty so the snake is nudged away from cycling in place
 - non-terminal moves now get a small Manhattan-distance shaping term (`0.05 * (previous_distance - current_distance)`) so the snake gets a denser signal for moving toward food
+- the DQN input now includes projected move-safety features for each relative action: reachable area, tail reachability, open exits, and next-step food distance
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
 - when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card explains when replay is unavailable and what will be captured next

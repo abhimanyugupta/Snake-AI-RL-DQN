@@ -1212,6 +1212,7 @@ class TrainingDashboard:
             f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
             f"Replay: {replay_summary}",
             f"Architecture: {agent.architecture_label}",
+            f"State features: {len(agent.STATE_LABELS)}",
             f"Latest loss: {self._format_metric(train_info.get('loss'))}",
         ]
 
@@ -1413,7 +1414,7 @@ class TrainingDashboard:
             {
                 "title": "RL Loop",
                 "lines": [
-                    "1. Observe the encoded state features.",
+                    f"1. Observe {len(agent.STATE_LABELS)} encoded features, including local cues plus projected move safety.",
                     f"2. Choose {action_info['action_label']} with {action_info['decision_type']}.",
                     "3. Store (state, action, reward, next_state) in hybrid replay memory.",
                     "4. Sample a mixed 70U/30P batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
@@ -1443,6 +1444,7 @@ class TrainingDashboard:
                 "lines": [
                     "Hybrid replay keeps some surprise-driven sampling without letting noisy transitions dominate every batch.",
                     "Double DQN reduces over-optimistic targets by splitting action choice from action evaluation.",
+                    "Projected move features add reachable-area, tail-reachability, and local-exit context before the snake commits to a turn.",
                     f"Epsilon is {agent.epsilon:.3f}, so the agent still explores when needed.",
                     f"The current MLP architecture is {agent.architecture_label}.",
                 ],
