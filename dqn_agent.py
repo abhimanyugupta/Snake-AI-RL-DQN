@@ -329,6 +329,7 @@ class DQNAgent:
     ):
         self.device_preference = normalize_device_preference(device_preference)
         self.device = resolve_torch_device(self.device_preference)
+        self.algorithm_label = "Double DQN"
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon = epsilon
@@ -582,7 +583,8 @@ class DQNAgent:
             predicted_selected = predicted_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
             with torch.no_grad():
-                next_best = self.target_net(next_states_t).max(dim=1).values
+                next_actions = self.policy_net(next_states_t).argmax(dim=1, keepdim=True)
+                next_best = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
                 target = rewards_t + (1.0 - dones_t) * self.gamma * next_best
 
             td_error = target - predicted_selected

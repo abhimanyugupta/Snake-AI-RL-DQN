@@ -24,6 +24,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - the post-run `Results` tab now has an interactive episode slider or scrubber for inspecting values across the full run
 - the finished-window loop has extra defensive rebuilding so post-run tab clicks do not immediately tear down the window on view refresh errors
 - non-terminal moves now get a small Manhattan-distance shaping term so the reward is denser when the snake moves toward food
+- the trainer now uses Double DQN target selection instead of the older plain DQN target
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -64,6 +65,11 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - keep death and food rewards unchanged
   - add Manhattan shaping only on ordinary non-terminal moves
   - still apply the soft anti-loop penalty on top of those ordinary moves
+- verified in-sandbox that the Double DQN trainer patch still compiles cleanly
+- verified by direct code inspection that training now:
+  - selects next actions with the policy net
+  - evaluates those chosen actions with the target net
+  - leaves the rest of the training loop unchanged
 
 ## Latest UI fixes
 
@@ -90,6 +96,10 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - `FOOD_PROGRESS_SHAPING_SCALE = 0.05`
   - ordinary moves now add `0.05 * (previous_distance - current_distance)`
   - food and death steps still use their original rewards only
+- upgraded the trainer from plain DQN targets to Double DQN targets:
+  - the policy net now chooses the next action
+  - the target net evaluates that chosen next action
+  - the teaching text now describes Double DQN instead of plain Bellman max-over-target updates
 - the lower dock now carries a `Stall threshold` entry box without shifting the main sidebar layout
 - parallel bulk mode no longer pretends the left board is one live run
   - the board now switches to an aggregate `Parallel Bulk Training` status panel

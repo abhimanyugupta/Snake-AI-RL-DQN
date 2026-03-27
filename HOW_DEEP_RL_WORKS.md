@@ -35,7 +35,7 @@ Each step of training does this:
 4. get reward and next state
 5. store that transition in replay memory
 6. sample a random mini-batch from memory
-7. move predicted Q-values toward Bellman targets
+7. choose the next action with the policy network, then evaluate that action with the target network
 8. occasionally copy the policy network into the target network
 
 ## Why replay memory matters
@@ -47,6 +47,16 @@ Replay memory mixes old and new experiences together so training is more stable.
 
 If the same network creates both the prediction and the target, learning can become unstable.
 The target network is a slower-moving copy used to compute better training targets.
+
+## Why Double DQN helps
+
+Plain DQN can overestimate future value because the same target path both picks and scores the best next action.
+This project now uses Double DQN:
+
+- the policy network picks the best next action
+- the target network scores that chosen action
+
+That usually makes targets less optimistic and helps training plateau less often.
 
 ## How device choice works here
 

@@ -986,7 +986,7 @@ class TrainingDashboard:
             help_lines = [
                 "[accent]Overview: board on the left, current decision on the right, history below.",
                 "[accent]Network: live forward pass across the configurable hidden layers.",
-                "[accent]Algorithm: Bellman target, replay memory, and target-net update flow.",
+                "[accent]Algorithm: Double-DQN target selection, replay memory, and target-net update flow.",
                 "[accent]Single mode is for learning and inspection; Parallel mode is for speed, especially on GPU.",
                 f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
             ]
@@ -1404,7 +1404,7 @@ class TrainingDashboard:
                     "1. Observe the encoded state features.",
                     f"2. Choose {action_info['action_label']} with {action_info['decision_type']}.",
                     "3. Store (state, action, reward, next_state) in replay memory.",
-                    "4. Sample a batch, compute Bellman targets, backpropagate, and sync the target net occasionally.",
+                    "4. Sample a batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
                 ],
             },
             {
@@ -1417,7 +1417,7 @@ class TrainingDashboard:
                 ],
             },
             {
-                "title": "Bellman Update",
+                "title": "Double DQN Update",
                 "lines": [
                     f"Predicted Q: {self._format_metric(train_info.get('example_predicted_q'))}",
                     f"Target Q: {self._format_metric(train_info.get('example_target_q'))}",
@@ -1429,7 +1429,7 @@ class TrainingDashboard:
                 "title": "Why It Helps",
                 "lines": [
                     "Replay memory reduces correlation between updates.",
-                    "The target network makes the learning target move more slowly.",
+                    "Double DQN reduces over-optimistic targets by splitting action choice from action evaluation.",
                     f"Epsilon is {agent.epsilon:.3f}, so the agent still explores when needed.",
                     f"The current MLP architecture is {agent.architecture_label}.",
                 ],

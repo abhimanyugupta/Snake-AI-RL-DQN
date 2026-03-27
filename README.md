@@ -9,7 +9,7 @@ It also supports a separate **parallel training mode** for higher-throughput bul
 - the richer 18-feature state vector seen by the DQN
 - live action selection and Q-values
 - replay-memory driven training
-- Bellman-target updates
+- Double-DQN target updates
 - target-network syncing
 - a local tabular baseline for comparison
 - a live neural-network view across configurable hidden layers
@@ -104,7 +104,7 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 
 - `Overview` - KPI cards, decision summary, controls, comparison graph, and top active features
 - `Network` - layer-by-layer heatmaps plus compact connection-strength blocks
-- `Algorithm` - short cards for the RL loop, current transition, Bellman update, and why replay/target networks help
+- `Algorithm` - short cards for the RL loop, current transition, Double DQN update, and why replay/target networks help
 
 ## Controls
 
