@@ -33,16 +33,17 @@ Each step of training does this:
 2. choose an action
 3. play that action in the game
 4. get reward and next state
-5. store that transition in prioritized replay memory
-6. sample a weighted mini-batch from memory
+5. store that transition in hybrid replay memory
+6. sample a mixed mini-batch from memory
 7. choose the next action with the policy network, then evaluate that action with the target network
 8. occasionally copy the policy network into the target network
 
-## Why prioritized replay matters
+## Why hybrid replay matters
 
 Consecutive Snake states are highly correlated.
 Replay memory mixes old and new experiences together so training is more stable.
-This project now also gives more sampling weight to transitions with larger TD error, so surprising or high-learning-value steps are replayed more often than routine ones.
+This project now mixes uniform replay with a smaller prioritized slice.
+That keeps batches diverse while still revisiting high-TD-error transitions more often than routine ones.
 
 ## Why there is a target network
 

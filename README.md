@@ -8,7 +8,7 @@ It also supports a separate **parallel training mode** for higher-throughput bul
 
 - the richer 18-feature state vector seen by the DQN
 - live action selection and Q-values
-- prioritized replay-memory driven training
+- hybrid replay-memory driven training
 - Double-DQN target updates
 - target-network syncing
 - a local tabular baseline for comparison
@@ -81,7 +81,7 @@ Notes:
 - `--parallel-envs` controls how many Snake environments the parallel trainer steps at once
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
 - if `--parallel-envs` is omitted, parallel mode now defaults to `64` on CUDA and `16` on CPU
-- replay is now proportional prioritized replay, so high-TD-error transitions are revisited more often than routine ones
+- replay is now hybrid replay, mixing `70%` uniform samples with `30%` priority-weighted samples
 - replay capacity now defaults to `200000`
 - parallel mode now uses a larger warmup (`10000`) and a smaller batch size (`512`) to improve sample efficiency
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
@@ -107,7 +107,7 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 
 - `Overview` - KPI cards, decision summary, controls, comparison graph, and top active features
 - `Network` - layer-by-layer heatmaps plus compact connection-strength blocks
-- `Algorithm` - short cards for the RL loop, current transition, Double DQN update, and why prioritized replay/target networks help
+- `Algorithm` - short cards for the RL loop, current transition, Double DQN update, and why hybrid replay/target networks help
 
 ## Controls
 

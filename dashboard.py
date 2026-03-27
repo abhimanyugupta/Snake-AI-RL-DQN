@@ -911,7 +911,8 @@ class TrainingDashboard:
         )
         replay_status = agent.replay_status()
         replay_summary = (
-            f"{replay_status.get('mode', 'Prioritized')} | "
+            f"{replay_status.get('mode', 'Hybrid')} | "
+            f"{replay_status.get('mix', '70U/30P')} | "
             f"cap {replay_status.get('capacity', 0)} | "
             f"beta {replay_status.get('beta', 0.0):.2f}"
         )
@@ -992,7 +993,7 @@ class TrainingDashboard:
             help_lines = [
                 "[accent]Overview: board on the left, current decision on the right, history below.",
                 "[accent]Network: live forward pass across the configurable hidden layers.",
-                "[accent]Algorithm: Double-DQN target selection, prioritized replay memory, and target-net update flow.",
+                "[accent]Algorithm: Double-DQN target selection, hybrid replay memory, and target-net update flow.",
                 "[accent]Single mode is for learning and inspection; Parallel mode is for speed, especially on GPU.",
                 f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
             ]
@@ -1398,7 +1399,7 @@ class TrainingDashboard:
                     "title": "RL Update",
                     "lines": [
                         f"Replay buffer size: {train_info.get('buffer_size', 0)}",
-                        f"Replay mode: {replay_status.get('mode', 'Prioritized')} | beta {replay_status.get('beta', 0.0):.2f}",
+                        f"Replay mode: {replay_status.get('mode', 'Hybrid')} {replay_status.get('mix', '70U/30P')} | beta {replay_status.get('beta', 0.0):.2f}",
                         f"Loss: {self._format_metric(train_info.get('loss'))}",
                         f"TD error: {self._format_metric(train_info.get('td_error'))}",
                         f"Epsilon: {agent.epsilon:.3f}",
@@ -1414,8 +1415,8 @@ class TrainingDashboard:
                 "lines": [
                     "1. Observe the encoded state features.",
                     f"2. Choose {action_info['action_label']} with {action_info['decision_type']}.",
-                    "3. Store (state, action, reward, next_state) in prioritized replay memory.",
-                    "4. Sample a weighted batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
+                    "3. Store (state, action, reward, next_state) in hybrid replay memory.",
+                    "4. Sample a mixed 70U/30P batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
                 ],
             },
             {
@@ -1440,7 +1441,7 @@ class TrainingDashboard:
             {
                 "title": "Why It Helps",
                 "lines": [
-                    "Prioritized replay revisits surprising transitions more often instead of treating every step equally.",
+                    "Hybrid replay keeps some surprise-driven sampling without letting noisy transitions dominate every batch.",
                     "Double DQN reduces over-optimistic targets by splitting action choice from action evaluation.",
                     f"Epsilon is {agent.epsilon:.3f}, so the agent still explores when needed.",
                     f"The current MLP architecture is {agent.architecture_label}.",

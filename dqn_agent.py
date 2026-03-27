@@ -27,11 +27,12 @@ LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
 DEFAULT_STALL_THRESHOLD = 150
 DEFAULT_REPLAY_CAPACITY = 200_000
-DEFAULT_PRIORITY_ALPHA = 0.6
+DEFAULT_PRIORITY_ALPHA = 0.4
 DEFAULT_PRIORITY_BETA_START = 0.4
-DEFAULT_PRIORITY_BETA_END = 1.0
-DEFAULT_PRIORITY_BETA_INCREMENT = 1e-4
+DEFAULT_PRIORITY_BETA_END = 0.8
+DEFAULT_PRIORITY_BETA_INCREMENT = 5e-5
 DEFAULT_PRIORITY_EPSILON = 1e-5
+DEFAULT_HYBRID_PRIORITIZED_FRACTION = 0.3
 
 
 def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
@@ -108,6 +109,7 @@ class ReplayBuffer:
         priority_beta_end: float = DEFAULT_PRIORITY_BETA_END,
         priority_beta_increment: float = DEFAULT_PRIORITY_BETA_INCREMENT,
         priority_epsilon: float = DEFAULT_PRIORITY_EPSILON,
+        prioritized_fraction: float = DEFAULT_HYBRID_PRIORITIZED_FRACTION,
     ):
         self.capacity = int(capacity)
         self.state_dim = int(state_dim)
@@ -119,6 +121,7 @@ class ReplayBuffer:
         self.priority_beta = float(priority_beta_start)
         self.priority_beta_increment = float(priority_beta_increment)
         self.priority_epsilon = float(priority_epsilon)
+        self.prioritized_fraction = float(min(1.0, max(0.0, prioritized_fraction)))
         self.max_priority = 1.0
         self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
         self.next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
@@ -139,14 +142,16 @@ class ReplayBuffer:
         done: bool,
     ) -> None:
         index = self.position
+        insertion_priority = self._insertion_priority()
         self.states[index] = np.asarray(state, dtype=np.float32)
         self.actions[index] = int(action_index)
         self.rewards[index] = float(reward)
         self.next_states[index] = np.asarray(next_state, dtype=np.float32)
         self.dones[index] = float(done)
-        self.priorities[index] = float(self.max_priority)
+        self.priorities[index] = float(insertion_priority)
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.capacity, self.size + 1)
+        self.max_priority = max(float(self.max_priority), float(insertion_priority))
 
     def add_batch(
         self,
@@ -172,6 +177,8 @@ class ReplayBuffer:
             dones = dones[-self.capacity :]
             batch_size = self.capacity
 
+        insertion_priority = self._insertion_priority()
+
         end = self.position + batch_size
         if end <= self.capacity:
             indices = slice(self.position, end)
@@ -180,7 +187,7 @@ class ReplayBuffer:
             self.rewards[indices] = rewards
             self.next_states[indices] = next_states
             self.dones[indices] = dones
-            self.priorities[indices] = float(self.max_priority)
+            self.priorities[indices] = float(insertion_priority)
         else:
             first_count = self.capacity - self.position
             second_count = batch_size - first_count
@@ -189,44 +196,64 @@ class ReplayBuffer:
             self.rewards[self.position :] = rewards[:first_count]
             self.next_states[self.position :] = next_states[:first_count]
             self.dones[self.position :] = dones[:first_count]
-            self.priorities[self.position :] = float(self.max_priority)
+            self.priorities[self.position :] = float(insertion_priority)
 
             self.states[:second_count] = states[first_count:]
             self.actions[:second_count] = actions[first_count:]
             self.rewards[:second_count] = rewards[first_count:]
             self.next_states[:second_count] = next_states[first_count:]
             self.dones[:second_count] = dones[first_count:]
-            self.priorities[:second_count] = float(self.max_priority)
+            self.priorities[:second_count] = float(insertion_priority)
 
         self.position = (self.position + batch_size) % self.capacity
         self.size = min(self.capacity, self.size + batch_size)
+        self.max_priority = max(float(self.max_priority), float(insertion_priority))
 
     def sample(self, batch_size: int):
         if self.size <= 0:
             raise ValueError("Cannot sample from an empty replay buffer.")
 
+        batch_size = int(batch_size)
+        prioritized_count = int(round(batch_size * self.prioritized_fraction))
+        prioritized_count = min(batch_size, max(0, prioritized_count))
+        uniform_count = batch_size - prioritized_count
         active_priorities = np.maximum(
             self.priorities[: self.size], self.priority_epsilon
         ).astype(np.float64, copy=False)
         scaled_priorities = np.power(active_priorities, self.priority_alpha, dtype=np.float64)
         total_priority = float(np.sum(scaled_priorities))
 
-        if not np.isfinite(total_priority) or total_priority <= 0.0:
-            probabilities = np.full(self.size, 1.0 / float(self.size), dtype=np.float64)
-            indices = np.random.randint(0, self.size, size=int(batch_size))
-        else:
+        if prioritized_count > 0 and np.isfinite(total_priority) and total_priority > 0.0:
             cumulative = np.cumsum(scaled_priorities)
-            random_values = np.random.random(size=int(batch_size)) * cumulative[-1]
-            indices = np.searchsorted(cumulative, random_values, side="right").astype(np.int64)
-            indices = np.minimum(indices, self.size - 1)
+            random_values = np.random.random(size=prioritized_count) * cumulative[-1]
+            prioritized_indices = np.searchsorted(cumulative, random_values, side="right").astype(np.int64)
+            prioritized_indices = np.minimum(prioritized_indices, self.size - 1)
             probabilities = scaled_priorities / cumulative[-1]
+            prioritized_probabilities = probabilities[prioritized_indices]
+            prioritized_weights = np.power(
+                float(self.size) * np.maximum(prioritized_probabilities, self.priority_epsilon),
+                -float(self.priority_beta),
+                dtype=np.float64,
+            ).astype(np.float32)
+        else:
+            uniform_count = batch_size
+            prioritized_indices = np.empty(0, dtype=np.int64)
+            prioritized_weights = np.empty(0, dtype=np.float32)
 
-        sampled_probabilities = probabilities[indices]
-        weights = np.power(
-            float(self.size) * np.maximum(sampled_probabilities, self.priority_epsilon),
-            -float(self.priority_beta),
-            dtype=np.float64,
-        ).astype(np.float32)
+        uniform_indices = (
+            np.random.randint(0, self.size, size=uniform_count).astype(np.int64)
+            if uniform_count > 0
+            else np.empty(0, dtype=np.int64)
+        )
+        uniform_weights = np.ones(uniform_count, dtype=np.float32)
+
+        indices = np.concatenate((uniform_indices, prioritized_indices), axis=0)
+        weights = np.concatenate((uniform_weights, prioritized_weights), axis=0)
+        if indices.size:
+            order = np.random.permutation(indices.size)
+            indices = indices[order]
+            weights = weights[order]
+
         max_weight = float(np.max(weights)) if weights.size else 0.0
         if max_weight > 0.0:
             weights /= max_weight
@@ -287,6 +314,17 @@ class ReplayBuffer:
         self.priorities[indices] = clipped
         self.max_priority = max(float(self.max_priority), float(np.max(clipped)))
 
+    def _insertion_priority(self) -> float:
+        if self.size <= 0:
+            return 1.0
+        active_priorities = np.maximum(
+            self.priorities[: self.size],
+            self.priority_epsilon,
+        )
+        active_max = float(np.max(active_priorities))
+        active_median = float(np.median(active_priorities))
+        return max(active_median, 0.5 * active_max, self.priority_epsilon)
+
     def state_dict(self) -> dict:
         return {
             "capacity": int(self.capacity),
@@ -305,6 +343,7 @@ class ReplayBuffer:
             "priority_beta": float(self.priority_beta),
             "priority_beta_increment": float(self.priority_beta_increment),
             "priority_epsilon": float(self.priority_epsilon),
+            "prioritized_fraction": float(self.prioritized_fraction),
             "max_priority": float(self.max_priority),
         }
 
@@ -326,6 +365,9 @@ class ReplayBuffer:
         )
         self.priority_epsilon = float(
             state.get("priority_epsilon", self.priority_epsilon)
+        )
+        self.prioritized_fraction = float(
+            state.get("prioritized_fraction", self.prioritized_fraction)
         )
         self.max_priority = float(state.get("max_priority", 1.0))
         self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
@@ -448,7 +490,7 @@ class DQNAgent:
     ):
         self.device_preference = normalize_device_preference(device_preference)
         self.device = resolve_torch_device(self.device_preference)
-        self.algorithm_label = "Double DQN + Prioritized Replay"
+        self.algorithm_label = "Double DQN + Hybrid Replay"
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon = epsilon
@@ -491,7 +533,7 @@ class DQNAgent:
             "update_count": 0,
             "batch_size": batch_size,
             "trainer_mode": "single",
-            "replay_mode": "Prioritized",
+            "replay_mode": "Hybrid",
             "replay_capacity": int(replay_capacity),
             "replay_beta": float(DEFAULT_PRIORITY_BETA_START),
         }
@@ -556,10 +598,11 @@ class DQNAgent:
 
     def replay_status(self) -> dict:
         return {
-            "mode": "Prioritized",
+            "mode": "Hybrid",
             "capacity": int(self.replay_buffer.capacity),
             "beta": float(self.replay_buffer.priority_beta),
             "alpha": float(self.replay_buffer.priority_alpha),
+            "mix": f"{int(round((1.0 - self.replay_buffer.prioritized_fraction) * 100))}U/{int(round(self.replay_buffer.prioritized_fraction * 100))}P",
         }
 
     def set_reheat_patience(self, patience: int) -> int:
