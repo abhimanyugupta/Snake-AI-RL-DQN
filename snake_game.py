@@ -33,6 +33,7 @@ class Point:
 LOOP_WINDOW_SIZE = 24
 LOOP_REPEAT_THRESHOLD = 3
 LOOP_REPEAT_PENALTY = -0.25
+FOOD_PROGRESS_SHAPING_SCALE = 0.05
 
 
 def _food_distance_for_env(env):
@@ -45,6 +46,13 @@ def _reset_loop_tracking_state(env):
     env._loop_signatures = deque(maxlen=LOOP_WINDOW_SIZE)
     env._loop_signature_counts = {}
     env._last_food_distance = _food_distance_for_env(env)
+
+
+def _food_progress_shaping(env, current_distance=None):
+    if current_distance is None:
+        current_distance = _food_distance_for_env(env)
+    previous_distance = getattr(env, "_last_food_distance", current_distance)
+    return FOOD_PROGRESS_SHAPING_SCALE * float(previous_distance - current_distance)
 
 
 def _append_loop_signature(env, signature):
@@ -60,8 +68,9 @@ def _append_loop_signature(env, signature):
     env._loop_signature_counts[signature] = env._loop_signature_counts.get(signature, 0) + 1
 
 
-def _maybe_apply_loop_penalty(env):
-    current_distance = _food_distance_for_env(env)
+def _maybe_apply_loop_penalty(env, current_distance=None):
+    if current_distance is None:
+        current_distance = _food_distance_for_env(env)
     previous_distance = getattr(env, "_last_food_distance", current_distance)
     food_progress = current_distance < previous_distance
     food = env.food or Point(-1, -1)
@@ -233,7 +242,9 @@ class SnakeLogicEnv:
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
-            reward += _maybe_apply_loop_penalty(self)
+            current_distance = _food_distance_for_env(self)
+            reward += _food_progress_shaping(self, current_distance=current_distance)
+            reward += _maybe_apply_loop_penalty(self, current_distance=current_distance)
 
         if self.render and draw_frame:
             self.draw()
@@ -517,7 +528,9 @@ class SnakeGameAI(SnakeLogicEnv):
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
-            reward += _maybe_apply_loop_penalty(self)
+            current_distance = _food_distance_for_env(self)
+            reward += _food_progress_shaping(self, current_distance=current_distance)
+            reward += _maybe_apply_loop_penalty(self, current_distance=current_distance)
 
         if self.render and draw_frame:
             self._draw_scene()

@@ -23,6 +23,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - repeated spin-loop behavior now gets a small soft penalty instead of only timing out
 - the post-run `Results` tab now has an interactive episode slider or scrubber for inspecting values across the full run
 - the finished-window loop has extra defensive rebuilding so post-run tab clicks do not immediately tear down the window on view refresh errors
+- non-terminal moves now get a small Manhattan-distance shaping term so the reward is denser when the snake moves toward food
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -58,6 +59,11 @@ Use these current commands instead of the older `--no-render` examples lower in 
 - verified a dummy-display post-run smoke:
   - `Results`, `Overview`, `Network`, `Algorithm`, then back to `Results` all redraw cleanly
   - the new results slider updates the selected episode index
+- verified in-sandbox that `py_compile` still passes after the Manhattan-shaping patch
+- verified by direct code inspection that both snake environments now:
+  - keep death and food rewards unchanged
+  - add Manhattan shaping only on ordinary non-terminal moves
+  - still apply the soft anti-loop penalty on top of those ordinary moves
 
 ## Latest UI fixes
 
@@ -80,6 +86,10 @@ Use these current commands instead of the older `--no-render` examples lower in 
 - added a soft anti-spin penalty in both snake environments:
   - repeated `(head, direction, food)` signatures inside a short window subtract a small extra reward
   - food pickups reset the loop detector
+- added Manhattan-distance reward shaping in both snake environments:
+  - `FOOD_PROGRESS_SHAPING_SCALE = 0.05`
+  - ordinary moves now add `0.05 * (previous_distance - current_distance)`
+  - food and death steps still use their original rewards only
 - the lower dock now carries a `Stall threshold` entry box without shifting the main sidebar layout
 - parallel bulk mode no longer pretends the left board is one live run
   - the board now switches to an aggregate `Parallel Bulk Training` status panel

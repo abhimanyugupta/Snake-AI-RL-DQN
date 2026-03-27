@@ -84,6 +84,7 @@ Notes:
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
 - the default stall threshold is now `150`, and the GUI exposes it as an editable lower-dock input
 - repeated spin-loop behavior now gets a small automatic penalty so the snake is nudged away from cycling in place
+- non-terminal moves now get a small Manhattan-distance shaping term (`0.05 * (previous_distance - current_distance)`) so the snake gets a denser signal for moving toward food
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
 - when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card explains when replay is unavailable and what will be captured next
