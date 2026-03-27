@@ -25,6 +25,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - the finished-window loop has extra defensive rebuilding so post-run tab clicks do not immediately tear down the window on view refresh errors
 - non-terminal moves now get a small Manhattan-distance shaping term so the reward is denser when the snake moves toward food
 - the trainer now uses Double DQN target selection instead of the older plain DQN target
+- the trainer now also uses proportional prioritized replay instead of uniform replay sampling
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -70,6 +71,12 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - selects next actions with the policy net
   - evaluates those chosen actions with the target net
   - leaves the rest of the training loop unchanged
+- verified in-sandbox that the prioritized replay patch compiles cleanly
+- verified by direct code inspection that replay now:
+  - stores per-transition priorities
+  - samples weighted batches with annealed beta
+  - updates priorities from absolute TD error
+  - falls back safely when older checkpoints do not contain priority data
 
 ## Latest UI fixes
 
@@ -100,6 +107,12 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - the policy net now chooses the next action
   - the target net evaluates that chosen next action
   - the teaching text now describes Double DQN instead of plain Bellman max-over-target updates
+- upgraded replay from uniform sampling to prioritized replay:
+  - new transitions enter with max priority
+  - sampled transitions carry importance weights into the Huber loss
+  - replay capacity now defaults to `200000`
+  - parallel mode now uses `warmup_size = 10000` and `batch_size = 512`
+  - old checkpoints without replay priorities still load with safe default priorities
 - the lower dock now carries a `Stall threshold` entry box without shifting the main sidebar layout
 - parallel bulk mode no longer pretends the left board is one live run
   - the board now switches to an aggregate `Parallel Bulk Training` status panel

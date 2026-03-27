@@ -1092,7 +1092,7 @@ def ensure_baseline_history(
 
 
 def resolve_parallel_batch_size(device_type):
-    return 1024 if str(device_type) == "cuda" else 512
+    return 512
 
 
 def resolve_parallel_env_count(device_type, requested_envs):
@@ -1106,7 +1106,7 @@ def configure_agent_for_mode(agent, trainer_mode):
     if trainer_mode == "parallel":
         agent.configure_training_schedule(
             batch_size=resolve_parallel_batch_size(agent.device.type),
-            warmup_size=1_000,
+            warmup_size=10_000,
             target_sync_interval=250,
             update_every_transitions=32,
             gradient_steps_per_update=2,

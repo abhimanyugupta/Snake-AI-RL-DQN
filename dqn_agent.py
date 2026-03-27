@@ -26,6 +26,12 @@ DEFAULT_HIDDEN_LAYERS = [256, 256, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
 DEFAULT_STALL_THRESHOLD = 150
+DEFAULT_REPLAY_CAPACITY = 200_000
+DEFAULT_PRIORITY_ALPHA = 0.6
+DEFAULT_PRIORITY_BETA_START = 0.4
+DEFAULT_PRIORITY_BETA_END = 1.0
+DEFAULT_PRIORITY_BETA_INCREMENT = 1e-4
+DEFAULT_PRIORITY_EPSILON = 1e-5
 
 
 def normalize_hidden_layers(hidden_layers: Iterable[int] | None) -> List[int]:
@@ -92,16 +98,34 @@ def load_checkpoint_network_config(path: str) -> dict:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, state_dim: int):
+    def __init__(
+        self,
+        capacity: int,
+        state_dim: int,
+        *,
+        priority_alpha: float = DEFAULT_PRIORITY_ALPHA,
+        priority_beta_start: float = DEFAULT_PRIORITY_BETA_START,
+        priority_beta_end: float = DEFAULT_PRIORITY_BETA_END,
+        priority_beta_increment: float = DEFAULT_PRIORITY_BETA_INCREMENT,
+        priority_epsilon: float = DEFAULT_PRIORITY_EPSILON,
+    ):
         self.capacity = int(capacity)
         self.state_dim = int(state_dim)
         self.position = 0
         self.size = 0
+        self.priority_alpha = float(priority_alpha)
+        self.priority_beta_start = float(priority_beta_start)
+        self.priority_beta_end = float(priority_beta_end)
+        self.priority_beta = float(priority_beta_start)
+        self.priority_beta_increment = float(priority_beta_increment)
+        self.priority_epsilon = float(priority_epsilon)
+        self.max_priority = 1.0
         self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
         self.next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
         self.actions = np.zeros(self.capacity, dtype=np.int64)
         self.rewards = np.zeros(self.capacity, dtype=np.float32)
         self.dones = np.zeros(self.capacity, dtype=np.float32)
+        self.priorities = np.ones(self.capacity, dtype=np.float32)
 
     def __len__(self) -> int:
         return int(self.size)
@@ -120,6 +144,7 @@ class ReplayBuffer:
         self.rewards[index] = float(reward)
         self.next_states[index] = np.asarray(next_state, dtype=np.float32)
         self.dones[index] = float(done)
+        self.priorities[index] = float(self.max_priority)
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.capacity, self.size + 1)
 
@@ -155,6 +180,7 @@ class ReplayBuffer:
             self.rewards[indices] = rewards
             self.next_states[indices] = next_states
             self.dones[indices] = dones
+            self.priorities[indices] = float(self.max_priority)
         else:
             first_count = self.capacity - self.position
             second_count = batch_size - first_count
@@ -163,28 +189,74 @@ class ReplayBuffer:
             self.rewards[self.position :] = rewards[:first_count]
             self.next_states[self.position :] = next_states[:first_count]
             self.dones[self.position :] = dones[:first_count]
+            self.priorities[self.position :] = float(self.max_priority)
 
             self.states[:second_count] = states[first_count:]
             self.actions[:second_count] = actions[first_count:]
             self.rewards[:second_count] = rewards[first_count:]
             self.next_states[:second_count] = next_states[first_count:]
             self.dones[:second_count] = dones[first_count:]
+            self.priorities[:second_count] = float(self.max_priority)
 
         self.position = (self.position + batch_size) % self.capacity
         self.size = min(self.capacity, self.size + batch_size)
 
     def sample(self, batch_size: int):
-        indices = np.random.randint(0, self.size, size=int(batch_size))
+        if self.size <= 0:
+            raise ValueError("Cannot sample from an empty replay buffer.")
+
+        active_priorities = np.maximum(
+            self.priorities[: self.size], self.priority_epsilon
+        ).astype(np.float64, copy=False)
+        scaled_priorities = np.power(active_priorities, self.priority_alpha, dtype=np.float64)
+        total_priority = float(np.sum(scaled_priorities))
+
+        if not np.isfinite(total_priority) or total_priority <= 0.0:
+            probabilities = np.full(self.size, 1.0 / float(self.size), dtype=np.float64)
+            indices = np.random.randint(0, self.size, size=int(batch_size))
+        else:
+            cumulative = np.cumsum(scaled_priorities)
+            random_values = np.random.random(size=int(batch_size)) * cumulative[-1]
+            indices = np.searchsorted(cumulative, random_values, side="right").astype(np.int64)
+            indices = np.minimum(indices, self.size - 1)
+            probabilities = scaled_priorities / cumulative[-1]
+
+        sampled_probabilities = probabilities[indices]
+        weights = np.power(
+            float(self.size) * np.maximum(sampled_probabilities, self.priority_epsilon),
+            -float(self.priority_beta),
+            dtype=np.float64,
+        ).astype(np.float32)
+        max_weight = float(np.max(weights)) if weights.size else 0.0
+        if max_weight > 0.0:
+            weights /= max_weight
+        beta_used = float(self.priority_beta)
+        self.priority_beta = min(
+            self.priority_beta_end,
+            self.priority_beta + self.priority_beta_increment,
+        )
         return (
             self.states[indices],
             self.actions[indices],
             self.rewards[indices],
             self.next_states[indices],
             self.dones[indices],
+            indices.astype(np.int64, copy=False),
+            weights,
+            beta_used,
         )
 
     def sample_tensors(self, batch_size: int, device: torch.device, pin_memory: bool = False):
-        states, actions, rewards, next_states, dones = self.sample(batch_size)
+        (
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+            indices,
+            weights,
+            beta_used,
+        ) = self.sample(batch_size)
         non_blocking = bool(pin_memory and device.type == "cuda")
 
         def to_device(array, dtype=None):
@@ -201,7 +273,19 @@ class ReplayBuffer:
             to_device(rewards, dtype=torch.float32),
             to_device(next_states, dtype=torch.float32),
             to_device(dones, dtype=torch.float32),
+            to_device(weights, dtype=torch.float32),
+            indices,
+            beta_used,
         )
+
+    def update_priorities(self, indices: np.ndarray, priorities: np.ndarray) -> None:
+        indices = np.asarray(indices, dtype=np.int64)
+        priorities = np.asarray(priorities, dtype=np.float32)
+        if indices.size == 0 or priorities.size == 0:
+            return
+        clipped = np.maximum(np.abs(priorities), self.priority_epsilon).astype(np.float32)
+        self.priorities[indices] = clipped
+        self.max_priority = max(float(self.max_priority), float(np.max(clipped)))
 
     def state_dict(self) -> dict:
         return {
@@ -214,6 +298,14 @@ class ReplayBuffer:
             "rewards": self.rewards[: self.size].copy(),
             "next_states": self.next_states[: self.size].copy(),
             "dones": self.dones[: self.size].copy(),
+            "priorities": self.priorities[: self.size].copy(),
+            "priority_alpha": float(self.priority_alpha),
+            "priority_beta_start": float(self.priority_beta_start),
+            "priority_beta_end": float(self.priority_beta_end),
+            "priority_beta": float(self.priority_beta),
+            "priority_beta_increment": float(self.priority_beta_increment),
+            "priority_epsilon": float(self.priority_epsilon),
+            "max_priority": float(self.max_priority),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -223,11 +315,25 @@ class ReplayBuffer:
         self.state_dim = state_dim
         self.position = int(state.get("position", 0))
         self.size = int(state.get("size", 0))
+        self.priority_alpha = float(state.get("priority_alpha", self.priority_alpha))
+        self.priority_beta_start = float(
+            state.get("priority_beta_start", self.priority_beta_start)
+        )
+        self.priority_beta_end = float(state.get("priority_beta_end", self.priority_beta_end))
+        self.priority_beta = float(state.get("priority_beta", self.priority_beta_start))
+        self.priority_beta_increment = float(
+            state.get("priority_beta_increment", self.priority_beta_increment)
+        )
+        self.priority_epsilon = float(
+            state.get("priority_epsilon", self.priority_epsilon)
+        )
+        self.max_priority = float(state.get("max_priority", 1.0))
         self.states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
         self.next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
         self.actions = np.zeros(self.capacity, dtype=np.int64)
         self.rewards = np.zeros(self.capacity, dtype=np.float32)
         self.dones = np.zeros(self.capacity, dtype=np.float32)
+        self.priorities = np.ones(self.capacity, dtype=np.float32)
 
         if "states" in state:
             loaded_size = min(self.capacity, int(state.get("size", len(state["states"]))))
@@ -238,6 +344,19 @@ class ReplayBuffer:
             self.rewards[:loaded_size] = np.asarray(state["rewards"], dtype=np.float32)[:loaded_size]
             self.next_states[:loaded_size] = np.asarray(state["next_states"], dtype=np.float32)[:loaded_size]
             self.dones[:loaded_size] = np.asarray(state["dones"], dtype=np.float32)[:loaded_size]
+            if "priorities" in state:
+                loaded_priorities = np.asarray(state["priorities"], dtype=np.float32)[:loaded_size]
+                self.priorities[:loaded_size] = np.maximum(
+                    loaded_priorities,
+                    self.priority_epsilon,
+                )
+                self.max_priority = max(
+                    float(self.max_priority),
+                    float(np.max(self.priorities[:loaded_size])) if loaded_size else 1.0,
+                )
+            elif loaded_size:
+                self.priorities[:loaded_size] = 1.0
+                self.max_priority = max(float(self.max_priority), 1.0)
             return
 
         raw_memory = state.get("memory", [])
@@ -318,7 +437,7 @@ class DQNAgent:
         epsilon: float = 1.0,
         epsilon_min: float = 0.02,
         epsilon_decay: float = 0.995,
-        replay_capacity: int = 25_000,
+        replay_capacity: int = DEFAULT_REPLAY_CAPACITY,
         batch_size: int = 256,
         warmup_size: int = 1_000,
         target_sync_interval: int = 250,
@@ -329,7 +448,7 @@ class DQNAgent:
     ):
         self.device_preference = normalize_device_preference(device_preference)
         self.device = resolve_torch_device(self.device_preference)
-        self.algorithm_label = "Double DQN"
+        self.algorithm_label = "Double DQN + Prioritized Replay"
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.epsilon = epsilon
@@ -372,6 +491,9 @@ class DQNAgent:
             "update_count": 0,
             "batch_size": batch_size,
             "trainer_mode": "single",
+            "replay_mode": "Prioritized",
+            "replay_capacity": int(replay_capacity),
+            "replay_beta": float(DEFAULT_PRIORITY_BETA_START),
         }
 
         self.policy_net = DQNNetwork(
@@ -388,8 +510,10 @@ class DQNAgent:
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
-        self.loss_fn = nn.SmoothL1Loss()
+        self.loss_fn = nn.SmoothL1Loss(reduction="none")
         self.replay_buffer = ReplayBuffer(replay_capacity, len(self.STATE_LABELS))
+        self.last_train_info["replay_capacity"] = int(self.replay_buffer.capacity)
+        self.last_train_info["replay_beta"] = float(self.replay_buffer.priority_beta)
         self._refresh_exploration_state()
 
     @property
@@ -429,6 +553,14 @@ class DQNAgent:
         if trainer_mode is not None:
             self.last_train_info["trainer_mode"] = str(trainer_mode)
         self.last_train_info["batch_size"] = int(self.batch_size)
+
+    def replay_status(self) -> dict:
+        return {
+            "mode": "Prioritized",
+            "capacity": int(self.replay_buffer.capacity),
+            "beta": float(self.replay_buffer.priority_beta),
+            "alpha": float(self.replay_buffer.priority_alpha),
+        }
 
     def set_reheat_patience(self, patience: int) -> int:
         self.reheat_patience = max(1, int(patience))
@@ -520,6 +652,7 @@ class DQNAgent:
         num_new_transitions: int = 1,
     ) -> dict:
         buffer_size = len(self.replay_buffer)
+        replay_status = self.replay_status()
         self.pending_transitions += max(0, int(num_new_transitions))
         if buffer_size < max(self.batch_size, self.warmup_size):
             info = {
@@ -537,6 +670,9 @@ class DQNAgent:
                 "update_count": 0,
                 "batch_size": int(self.batch_size),
                 "trainer_mode": self.last_train_info.get("trainer_mode", "single"),
+                "replay_mode": replay_status["mode"],
+                "replay_capacity": replay_status["capacity"],
+                "replay_beta": replay_status["beta"],
             }
             self.last_train_info = info
             return info
@@ -551,6 +687,9 @@ class DQNAgent:
                     "did_update": False,
                     "update_count": 0,
                     "batch_size": int(self.batch_size),
+                    "replay_mode": replay_status["mode"],
+                    "replay_capacity": replay_status["capacity"],
+                    "replay_beta": replay_status["beta"],
                 }
             )
             self.last_train_info = info
@@ -573,7 +712,16 @@ class DQNAgent:
             if len(self.replay_buffer) < max(self.batch_size, self.warmup_size):
                 break
 
-            states_t, actions_t, rewards_t, next_states_t, dones_t = self.replay_buffer.sample_tensors(
+            (
+                states_t,
+                actions_t,
+                rewards_t,
+                next_states_t,
+                dones_t,
+                importance_weights_t,
+                sampled_indices,
+                sampled_beta,
+            ) = self.replay_buffer.sample_tensors(
                 self.batch_size,
                 device=self.device,
                 pin_memory=self.pin_memory_transfers,
@@ -588,12 +736,17 @@ class DQNAgent:
                 target = rewards_t + (1.0 - dones_t) * self.gamma * next_best
 
             td_error = target - predicted_selected
-            loss = self.loss_fn(predicted_selected, target)
+            per_sample_loss = self.loss_fn(predicted_selected, target)
+            loss = (per_sample_loss * importance_weights_t).mean()
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
             self.optimizer.step()
+            self.replay_buffer.update_priorities(
+                sampled_indices,
+                td_error.detach().abs().cpu().numpy(),
+            )
 
             self.train_steps += 1
             update_count += 1
@@ -622,6 +775,9 @@ class DQNAgent:
             "update_count": int(update_count),
             "batch_size": int(self.batch_size),
             "trainer_mode": self.last_train_info.get("trainer_mode", "single"),
+            "replay_mode": replay_status["mode"],
+            "replay_capacity": replay_status["capacity"],
+            "replay_beta": float(self.replay_buffer.priority_beta),
         }
         if collect_diagnostics and update_count:
             info.update(
@@ -952,6 +1108,7 @@ class DQNAgent:
                 "update_every_transitions": int(self.update_every_transitions),
                 "gradient_steps_per_update": int(self.gradient_steps_per_update),
                 "pending_transitions": int(self.pending_transitions),
+                "replay_capacity": int(self.replay_buffer.capacity),
             },
             "exploration_state": {
                 "base_epsilon": float(self.base_epsilon),
@@ -1045,6 +1202,10 @@ class DQNAgent:
         replay_state = checkpoint.get("replay_buffer")
         if replay_state:
             self.replay_buffer.load_state_dict(replay_state)
+        replay_status = self.replay_status()
+        self.last_train_info["replay_mode"] = replay_status["mode"]
+        self.last_train_info["replay_capacity"] = replay_status["capacity"]
+        self.last_train_info["replay_beta"] = replay_status["beta"]
         return checkpoint.get("extra_state", {})
 
     def encode_state(self, game, out: np.ndarray | None = None) -> np.ndarray:

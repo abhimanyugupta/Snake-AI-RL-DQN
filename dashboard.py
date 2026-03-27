@@ -909,6 +909,12 @@ class TrainingDashboard:
         exploration_summary = (
             f"{exploration.get('reheat_count', 0)} | cd {exploration.get('cooldown_remaining', 0)}"
         )
+        replay_status = agent.replay_status()
+        replay_summary = (
+            f"{replay_status.get('mode', 'Prioritized')} | "
+            f"cap {replay_status.get('capacity', 0)} | "
+            f"beta {replay_status.get('beta', 0.0):.2f}"
+        )
 
         if lightweight:
             network_view = {
@@ -986,7 +992,7 @@ class TrainingDashboard:
             help_lines = [
                 "[accent]Overview: board on the left, current decision on the right, history below.",
                 "[accent]Network: live forward pass across the configurable hidden layers.",
-                "[accent]Algorithm: Double-DQN target selection, replay memory, and target-net update flow.",
+                "[accent]Algorithm: Double-DQN target selection, prioritized replay memory, and target-net update flow.",
                 "[accent]Single mode is for learning and inspection; Parallel mode is for speed, especially on GPU.",
                 f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
             ]
@@ -1014,6 +1020,7 @@ class TrainingDashboard:
                 f"Batch size: {train_info.get('batch_size', agent.batch_size)}",
                 f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
                 f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
+                f"Replay: {replay_summary}",
                 f"Architecture: {agent.architecture_label}",
             ]
         else:
@@ -1022,6 +1029,7 @@ class TrainingDashboard:
                 f"Selection mode: {action_info['decision_type']}",
                 f"Greedy favorite: {agent.ACTION_LABELS[best_action_index]} ({best_q:+.3f})",
                 f"Food cue: {agent.explain_food_view(state)}",
+                f"Replay: {replay_summary}",
                 f"Architecture: {agent.architecture_label}",
             ]
         if lightweight:
@@ -1201,6 +1209,7 @@ class TrainingDashboard:
                 else "Trainer mode: Parallel (speed/throughput)"
             ),
             f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
+            f"Replay: {replay_summary}",
             f"Architecture: {agent.architecture_label}",
             f"Latest loss: {self._format_metric(train_info.get('loss'))}",
         ]
@@ -1356,6 +1365,7 @@ class TrainingDashboard:
         parallel_phase = str(context.get("parallel_phase", "single")).strip().lower()
         parallel_envs = int(max(1, context.get("parallel_envs", 1)))
         eval_tail_episodes = int(max(1, context.get("eval_tail_episodes", 3)))
+        replay_status = agent.replay_status()
 
         if trainer_mode == "parallel" and parallel_phase == "bulk":
             return [
@@ -1388,6 +1398,7 @@ class TrainingDashboard:
                     "title": "RL Update",
                     "lines": [
                         f"Replay buffer size: {train_info.get('buffer_size', 0)}",
+                        f"Replay mode: {replay_status.get('mode', 'Prioritized')} | beta {replay_status.get('beta', 0.0):.2f}",
                         f"Loss: {self._format_metric(train_info.get('loss'))}",
                         f"TD error: {self._format_metric(train_info.get('td_error'))}",
                         f"Epsilon: {agent.epsilon:.3f}",
@@ -1403,8 +1414,8 @@ class TrainingDashboard:
                 "lines": [
                     "1. Observe the encoded state features.",
                     f"2. Choose {action_info['action_label']} with {action_info['decision_type']}.",
-                    "3. Store (state, action, reward, next_state) in replay memory.",
-                    "4. Sample a batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
+                    "3. Store (state, action, reward, next_state) in prioritized replay memory.",
+                    "4. Sample a weighted batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
                 ],
             },
             {
@@ -1423,12 +1434,13 @@ class TrainingDashboard:
                     f"Target Q: {self._format_metric(train_info.get('example_target_q'))}",
                     f"TD error: {self._format_metric(train_info.get('example_td_error'))}",
                     f"Loss: {self._format_metric(train_info.get('loss'))}",
+                    f"Replay beta: {replay_status.get('beta', 0.0):.2f}",
                 ],
             },
             {
                 "title": "Why It Helps",
                 "lines": [
-                    "Replay memory reduces correlation between updates.",
+                    "Prioritized replay revisits surprising transitions more often instead of treating every step equally.",
                     "Double DQN reduces over-optimistic targets by splitting action choice from action evaluation.",
                     f"Epsilon is {agent.epsilon:.3f}, so the agent still explores when needed.",
                     f"The current MLP architecture is {agent.architecture_label}.",
