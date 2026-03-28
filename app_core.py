@@ -29,7 +29,6 @@ from dqn_agent import (
     normalize_hidden_layers,
 )
 from metrics_utils import (
-    append_metric_entry,
     append_metric_entries,
     build_history,
     group_entries_by_algo,
@@ -488,19 +487,21 @@ def capture_replay_frame(
     overlay_title=None,
     overlay_subtitle=None,
 ):
+    def serialize_point(point):
+        if point is None:
+            return None
+        return (int(point.x), int(point.y))
+
     return {
-        "snake": list(game.snake),
-        "head": game.head,
-        "food": game.food,
-        "direction": game.direction,
+        "snake": [serialize_point(part) for part in game.snake],
+        "head": serialize_point(game.head),
+        "food": serialize_point(game.food),
+        "direction": int(game.direction.value),
         "score": int(game.score),
         "frame_iteration": int(game.frame_iteration),
-        "state": np.asarray(state, dtype=np.float32).tolist(),
-        "action_info": copy.deepcopy(action_info),
         "current_game_number": int(current_game_number),
         "episode_goal": int(max(current_game_number, episode_goal)),
         "best_score": int(best_score),
-        "context": copy.deepcopy(context),
         "show_baseline": bool(show_baseline),
         "overlay_title": overlay_title,
         "overlay_subtitle": overlay_subtitle,
@@ -647,10 +648,24 @@ def build_training_finished_view(
 
 
 def apply_replay_frame(game, dashboard, agent, frame):
-    game.snake = list(frame.get("snake", []))
-    game.head = frame.get("head", game.head)
-    game.food = frame.get("food", game.food)
-    game.direction = frame.get("direction", game.direction)
+    point_cls = game.head.__class__
+
+    def decode_point(payload, fallback=None):
+        if payload is None:
+            return fallback
+        if hasattr(payload, "x") and hasattr(payload, "y"):
+            return payload
+        x, y = payload
+        return point_cls(int(x), int(y))
+
+    game.snake = [decode_point(part) for part in frame.get("snake", [])]
+    game.head = decode_point(frame.get("head"), game.head)
+    game.food = decode_point(frame.get("food"), game.food)
+    direction_value = frame.get("direction", game.direction.value)
+    try:
+        game.direction = game.direction.__class__(direction_value)
+    except Exception:
+        game.direction = frame.get("direction", game.direction)
     game.score = int(frame.get("score", game.score))
     game.frame_iteration = int(frame.get("frame_iteration", game.frame_iteration))
     game.snake_body_set = set(game.snake[1:])
@@ -665,7 +680,9 @@ def apply_replay_frame(game, dashboard, agent, frame):
         if stored_state is not None
         else agent.encode_state(game)
     )
-    action_info = copy.deepcopy(frame.get("action_info") or agent.get_action_details(state, greedy=True))
+    action_info = copy.deepcopy(
+        frame.get("action_info") or agent.get_action_details(state, greedy=True)
+    )
     context = copy.deepcopy(frame.get("context") or build_training_context("Replay", 0.0, agent.last_train_info, {"reward_text": "n/a"}))
     frame_data = build_dashboard_frame(
         game=game,
@@ -730,6 +747,12 @@ def build_live_train_info(train_info, session_perf, episode_steps):
     info["episode_steps"] = int(max(0, episode_steps))
     info["env_steps_per_sec"] = float(session_perf["env_steps"] / elapsed)
     info["updates_per_sec"] = float(session_perf["updates"] / elapsed)
+    timings = session_perf.get("timings", {})
+    timing_counts = session_perf.get("timing_counts", {})
+    for bucket in ("encode", "env_step", "replay", "train", "frame_build", "draw"):
+        count = int(timing_counts.get(bucket, 0))
+        if count > 0:
+            info[f"{bucket}_ms"] = float((timings.get(bucket, 0.0) / count) * 1000.0)
     return info
 
 
@@ -989,10 +1012,28 @@ def show_post_run_results(
 
     if recent_episode_replays and recent_episode_replays[-1].get("frames"):
         last_frame = recent_episode_replays[-1]["frames"][-1]
-        results_game.snake = list(last_frame.get("snake", results_game.snake))
-        results_game.head = last_frame.get("head", results_game.head)
-        results_game.food = last_frame.get("food", results_game.food)
-        results_game.direction = last_frame.get("direction", results_game.direction)
+        point_cls = results_game.head.__class__
+
+        def decode_point(payload, fallback=None):
+            if payload is None:
+                return fallback
+            if hasattr(payload, "x") and hasattr(payload, "y"):
+                return payload
+            x, y = payload
+            return point_cls(int(x), int(y))
+
+        results_game.snake = [
+            decode_point(part) for part in last_frame.get("snake", results_game.snake)
+        ]
+        results_game.head = decode_point(last_frame.get("head"), results_game.head)
+        results_game.food = decode_point(last_frame.get("food"), results_game.food)
+        direction_value = last_frame.get("direction", results_game.direction.value)
+        try:
+            results_game.direction = results_game.direction.__class__(direction_value)
+        except Exception:
+            results_game.direction = last_frame.get("direction", results_game.direction)
+        if results_game.snake:
+            results_game.snake[0] = results_game.head
         results_game.score = int(last_frame.get("score", results_game.score))
         results_game.frame_iteration = int(
             last_frame.get("frame_iteration", results_game.frame_iteration)
@@ -1128,6 +1169,43 @@ def flush_metric_buffer(metrics_log_path, pending_entries):
     if pending_entries:
         append_metric_entries(metrics_log_path, pending_entries)
         pending_entries.clear()
+
+
+def queue_metric_entry(metrics_log_path, pending_entries, metric_entry, flush_every=8):
+    pending_entries.append(metric_entry)
+    if len(pending_entries) >= flush_every:
+        flush_metric_buffer(metrics_log_path, pending_entries)
+
+
+def init_session_perf():
+    return {
+        "start_time": time.perf_counter(),
+        "env_steps": 0,
+        "updates": 0,
+        "timings": {
+            "encode": 0.0,
+            "env_step": 0.0,
+            "replay": 0.0,
+            "train": 0.0,
+            "frame_build": 0.0,
+            "draw": 0.0,
+        },
+        "timing_counts": {
+            "encode": 0,
+            "env_step": 0,
+            "replay": 0,
+            "train": 0,
+            "frame_build": 0,
+            "draw": 0,
+        },
+    }
+
+
+def record_perf_timing(session_perf, bucket, elapsed):
+    timings = session_perf.setdefault("timings", {})
+    timing_counts = session_perf.setdefault("timing_counts", {})
+    timings[bucket] = float(timings.get(bucket, 0.0) + float(elapsed))
+    timing_counts[bucket] = int(timing_counts.get(bucket, 0) + 1)
 
 
 def maybe_build_parallel_frame(
@@ -1283,7 +1361,9 @@ def train_parallel_mode(
     reward_config = dict(dashboard.reward_config)
     for env in envs:
         env.set_reward_config(reward_config)
+    encode_started = time.perf_counter()
     env_states = agent.encode_states(envs)
+    record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
     next_states_batch = np.empty_like(env_states)
     rewards_batch = np.empty(parallel_envs, dtype=np.float32)
     dones_batch = np.empty(parallel_envs, dtype=np.float32)
@@ -1435,6 +1515,8 @@ def train_parallel_mode(
         action_indices = agent.get_action_indices_batch(env_states, greedy=False)
         completed_records = []
         responsive_chunk = max(4, min(16, parallel_envs // 4 if parallel_envs > 8 else parallel_envs))
+        env_step_started = time.perf_counter()
+        encode_elapsed = 0.0
 
         for env_index, env in enumerate(envs):
             reward, game_over, score = env.play_step(
@@ -1459,7 +1541,9 @@ def train_parallel_mode(
                     }
                 )
             else:
+                encode_started = time.perf_counter()
                 agent.encode_state(env, out=next_states_batch[env_index])
+                encode_elapsed += time.perf_counter() - encode_started
 
             if (
                 game.render
@@ -1482,7 +1566,11 @@ def train_parallel_mode(
 
         if game.quit_requested:
             break
+        record_perf_timing(session_perf, "env_step", time.perf_counter() - env_step_started)
+        if encode_elapsed > 0.0:
+            record_perf_timing(session_perf, "encode", encode_elapsed)
 
+        replay_started = time.perf_counter()
         emitted_transitions = agent.remember_batch(
             env_states,
             action_indices,
@@ -1490,13 +1578,16 @@ def train_parallel_mode(
             next_states_batch,
             dones_batch,
         )
+        record_perf_timing(session_perf, "replay", time.perf_counter() - replay_started)
         env_states, next_states_batch = next_states_batch, env_states
         session_perf["env_steps"] += parallel_envs
         collect_diagnostics = bool(completed_records or frame_due or (bulk_iteration % 16 == 0))
+        train_started = time.perf_counter()
         train_info = agent.train_step(
             collect_diagnostics=collect_diagnostics,
             num_new_transitions=emitted_transitions,
         )
+        record_perf_timing(session_perf, "train", time.perf_counter() - train_started)
         session_perf["updates"] += int(train_info.get("update_count", 0))
 
         remaining_bulk_slots = max(0, bulk_target - completed_in_session())
@@ -1545,7 +1636,9 @@ def train_parallel_mode(
                 env = envs[record["env_index"]]
                 env.reset()
                 env.set_reward_config(reward_config)
+                encode_started = time.perf_counter()
                 agent.encode_state(env, out=env_states[record["env_index"]])
+                record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
                 episode_rewards[record["env_index"]] = 0.0
                 episode_steps[record["env_index"]] = 0
 
@@ -1574,6 +1667,7 @@ def train_parallel_mode(
             representative_state = env_states[0]
             copy_env_state_to_game(game, representative_env)
             preview_action = agent.get_action_details(representative_state, greedy=True)
+            frame_started = time.perf_counter()
             game.set_dashboard_data(
                 build_dashboard_frame(
                     game=game,
@@ -1595,7 +1689,10 @@ def train_parallel_mode(
                     recent_replays_panel=current_recent_replays_panel(parallel_phase="bulk"),
                 )
             )
+            record_perf_timing(session_perf, "frame_build", time.perf_counter() - frame_started)
+            draw_started = time.perf_counter()
             game.draw()
+            record_perf_timing(session_perf, "draw", time.perf_counter() - draw_started)
             if dashboard.current_delay_ms > 0 and not dashboard.turbo_toggle.value:
                 pygame.time.delay(min(30, dashboard.current_delay_ms))
 
@@ -1823,7 +1920,9 @@ def train_parallel_mode(
             )
 
         moving_avg = dashboard.deep_average_history[-1]
-        pending_metric_entries.append(
+        queue_metric_entry(
+            metrics_log_path,
+            pending_metric_entries,
             build_metric_entry(
                 algo="deep",
                 episode=agent.n_games,
@@ -1835,10 +1934,8 @@ def train_parallel_mode(
                 steps=step_count,
                 buffer_size=len(agent.replay_buffer),
                 best_score=best_score,
-            )
+            ),
         )
-        if len(pending_metric_entries) >= 8:
-            flush_metric_buffer(metrics_log_path, pending_metric_entries)
         if agent.n_games % checkpoint_every == 0:
             save_parallel_checkpoint()
 
@@ -1957,11 +2054,8 @@ def train_session(
     fast_tail_episodes = max(1, int(fast_tail_episodes))
     recent_episode_replays = deque(maxlen=3)
     active_trainer_mode = resolved_trainer_mode
-    session_perf = {
-        "start_time": time.perf_counter(),
-        "env_steps": 0,
-        "updates": 0,
-    }
+    session_perf = init_session_perf()
+    pending_metric_entries = []
     finish_requested = False
 
     try:
@@ -2034,7 +2128,9 @@ def train_session(
             stripped_episode = bool(episode_fast_mode)
 
             game.reset()
+            encode_started = time.perf_counter()
             state = agent.encode_state(game)
+            record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
             step_count = 0
             episode_reward = 0.0
             episode_replay_frames = []
@@ -2106,7 +2202,8 @@ def train_session(
 
                 if not dashboard.started:
                     preview_info = agent.get_action_details(state, greedy=True)
-                    draw_dashboard_frame(
+                    frame_started = time.perf_counter()
+                    frame = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
                         agent=agent,
@@ -2126,11 +2223,17 @@ def train_session(
                             else "Click Start [Enter] to begin training."
                         ),
                     )
+                    game.set_dashboard_data(frame)
+                    record_perf_timing(session_perf, "frame_build", time.perf_counter() - frame_started)
+                    draw_started = time.perf_counter()
+                    game.draw()
+                    record_perf_timing(session_perf, "draw", time.perf_counter() - draw_started)
                     pygame.time.delay(30)
                     continue
 
                 if dashboard.pause_toggle.value:
                     preview_info = agent.get_action_details(state, greedy=True)
+                    frame_started = time.perf_counter()
                     game.set_dashboard_data(
                         build_dashboard_frame(
                             game=game,
@@ -2147,8 +2250,11 @@ def train_session(
                             recent_replays_panel=current_recent_replays_panel(),
                         )
                     )
+                    record_perf_timing(session_perf, "frame_build", time.perf_counter() - frame_started)
                     if render:
+                        draw_started = time.perf_counter()
                         game.draw()
+                        record_perf_timing(session_perf, "draw", time.perf_counter() - draw_started)
                         pygame.time.delay(30)
                     else:
                         pygame.time.delay(5)
@@ -2160,9 +2266,6 @@ def train_session(
                 )
                 step_count += 1
                 live_render_enabled = bool(render and not stripped_episode)
-                live_context = current_context(
-                    "Fast mode" if episode_fast_mode else "Training"
-                )
 
                 if capture_episode_replay:
                     episode_replay_frames.append(
@@ -2173,11 +2276,15 @@ def train_session(
                             current_game_number=current_game_number,
                             episode_goal=episode_goal,
                             best_score=best_score,
-                            context=live_context,
+                            context=None,
                             show_baseline=episode_show_baseline,
                         )
                     )
                 if live_render_enabled:
+                    live_context = current_context(
+                        "Fast mode" if episode_fast_mode else "Training"
+                    )
+                    frame_started = time.perf_counter()
                     frame_data = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
@@ -2192,20 +2299,28 @@ def train_session(
                         show_baseline=episode_show_baseline,
                         recent_replays_panel=current_recent_replays_panel(),
                     )
+                    record_perf_timing(session_perf, "frame_build", time.perf_counter() - frame_started)
                     game.set_dashboard_data(frame_data)
                     if dashboard.should_draw_frame(step_count):
+                        draw_started = time.perf_counter()
                         game.draw()
+                        record_perf_timing(session_perf, "draw", time.perf_counter() - draw_started)
                         if dashboard.current_delay_ms > 0:
                             pygame.time.delay(dashboard.current_delay_ms)
 
+                env_step_started = time.perf_counter()
                 reward, game_over, score = game.play_step(
                     action_info["action"],
                     events=[],
                     draw_frame=False,
                     apply_pacing=not stripped_episode,
                 )
+                record_perf_timing(session_perf, "env_step", time.perf_counter() - env_step_started)
                 episode_reward += reward
+                encode_started = time.perf_counter()
                 next_state = agent.encode_state(game)
+                record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
+                replay_started = time.perf_counter()
                 emitted_transitions = agent.remember(
                     state=state,
                     action_index=action_info["action_index"],
@@ -2213,14 +2328,17 @@ def train_session(
                     next_state=next_state,
                     done=game_over,
                 )
+                record_perf_timing(session_perf, "replay", time.perf_counter() - replay_started)
                 session_perf["env_steps"] += 1
                 collect_diagnostics = bool(
                     not stripped_episode or game_over or (step_count % 64 == 0)
                 )
+                train_started = time.perf_counter()
                 train_info = agent.train_step(
                     collect_diagnostics=collect_diagnostics,
                     num_new_transitions=emitted_transitions,
                 )
+                record_perf_timing(session_perf, "train", time.perf_counter() - train_started)
                 if train_info.get("did_update"):
                     session_perf["updates"] += 1
                 state = next_state
@@ -2235,6 +2353,7 @@ def train_session(
                         "Fast mode" if episode_fast_mode else "Training",
                         train_info_override=train_info,
                     )
+                    frame_started = time.perf_counter()
                     final_view = build_dashboard_frame(
                         game=game,
                         dashboard=dashboard,
@@ -2251,6 +2370,7 @@ def train_session(
                     )
                     final_view["overlay_title"] = "Episode finished"
                     final_view["overlay_subtitle"] = f"Reward: {reward:+.2f}"
+                    record_perf_timing(session_perf, "frame_build", time.perf_counter() - frame_started)
                     game.set_dashboard_data(final_view)
                     if capture_episode_replay:
                         episode_replay_frames.append(
@@ -2261,21 +2381,19 @@ def train_session(
                                 current_game_number=current_game_number,
                                 episode_goal=episode_goal,
                                 best_score=best_score,
-                                context=final_context,
+                                context=None,
                                 show_baseline=episode_show_baseline,
                                 overlay_title="Episode finished",
                                 overlay_subtitle=f"Reward: {reward:+.2f}",
                             )
                         )
+                    draw_started = time.perf_counter()
                     game.draw()
+                    record_perf_timing(session_perf, "draw", time.perf_counter() - draw_started)
                     pygame.time.delay(
                         120 if dashboard.turbo_toggle.value else max(140, dashboard.current_delay_ms)
                     )
                 elif game_over and capture_episode_replay:
-                    final_context = current_context(
-                        "Fast mode" if episode_fast_mode else "Training",
-                        train_info_override=train_info,
-                    )
                     episode_replay_frames.append(
                         capture_replay_frame(
                             game,
@@ -2284,7 +2402,7 @@ def train_session(
                             current_game_number=current_game_number,
                             episode_goal=episode_goal,
                             best_score=best_score,
-                            context=final_context,
+                            context=None,
                             show_baseline=episode_show_baseline,
                             overlay_title="Episode finished",
                             overlay_subtitle=f"Reward: {reward:+.2f}",
@@ -2334,9 +2452,10 @@ def train_session(
                 buffer_size=len(agent.replay_buffer),
                 best_score=best_score,
             )
-            append_metric_entry(metrics_log_path, metric_entry)
+            queue_metric_entry(metrics_log_path, pending_metric_entries, metric_entry)
 
             if agent.n_games % checkpoint_every == 0 or score == best_score:
+                flush_metric_buffer(metrics_log_path, pending_metric_entries)
                 save_checkpoint(
                     agent,
                     checkpoint_path,
@@ -2372,6 +2491,7 @@ def train_session(
         if active_trainer_mode == "single" and not game.quit_requested:
             training_completed = True
     finally:
+        flush_metric_buffer(metrics_log_path, pending_metric_entries)
         save_checkpoint(
             agent,
             checkpoint_path,

@@ -100,6 +100,9 @@ Notes:
 - during parallel bulk mode, the left board switches to an aggregate status panel so it does not pretend to show one specific run
 - in parallel mode, only the newest 3 evaluation-tail replays are kept in memory
 - the parallel trainer now reuses preallocated state buffers instead of rebuilding NumPy state batches every step
+- the 30-feature encoder now uses cached cell-grid occupancy data and one projected flood-fill per candidate move instead of rebuilding Python `set` graphs for every check
+- replay capture now stores compact logical frame snapshots and reconstructs the dashboard lazily during playback
+- single-mode deep metrics now flush in buffered batches, and the render path caches the static board background plus skips `smoothscale` when the logical and real display sizes already match
 
 ## Visualizer
 

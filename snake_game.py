@@ -139,6 +139,13 @@ class SnakeLogicEnv:
         self._overlay_surface = None
         self._glow_surface = None
         self._real_display = None
+        self.board_cols = max(1, self.board_w // self.block_size)
+        self.board_rows = max(1, self.board_h // self.block_size)
+        self.board_cell_count = self.board_cols * self.board_rows
+        self._occupied_cells = bytearray(self.board_cell_count)
+        self._snake_cell_indices = []
+        self._head_cell_index = -1
+        self._tail_cell_index = -1
         self.reset()
 
     def scale_events(self, events):
@@ -171,6 +178,7 @@ class SnakeLogicEnv:
         self.food = None
         self.frame_iteration = 0
         self._place_food()
+        self._rebuild_cell_cache()
         _reset_loop_tracking_state(self)
 
     def set_dashboard_data(self, data):
@@ -202,6 +210,54 @@ class SnakeLogicEnv:
             if self.food != self.head and self.food not in self.snake_body_set:
                 break
 
+    def _cell_coords_from_point(self, point):
+        return (int(point.x // self.block_size), int(point.y // self.block_size))
+
+    def _cell_index_from_coords(self, cell_x, cell_y):
+        return int(cell_y * self.board_cols + cell_x)
+
+    def _cell_index_from_point(self, point):
+        cell_x, cell_y = self._cell_coords_from_point(point)
+        return self._cell_index_from_coords(cell_x, cell_y)
+
+    def _cell_coords_from_index(self, cell_index):
+        cell_index = int(cell_index)
+        return (cell_index % self.board_cols, cell_index // self.board_cols)
+
+    def _ensure_cell_cache(self):
+        if len(self._occupied_cells) != self.board_cell_count:
+            self._occupied_cells = bytearray(self.board_cell_count)
+        if not self.snake:
+            self._snake_cell_indices = []
+            self._head_cell_index = -1
+            self._tail_cell_index = -1
+            return
+        head_index = self._cell_index_from_point(self.head)
+        tail_index = self._cell_index_from_point(self.snake[-1])
+        if (
+            len(self._snake_cell_indices) != len(self.snake)
+            or self._head_cell_index != head_index
+            or self._tail_cell_index != tail_index
+        ):
+            self._rebuild_cell_cache()
+
+    def _rebuild_cell_cache(self):
+        if len(self._occupied_cells) != self.board_cell_count:
+            self._occupied_cells = bytearray(self.board_cell_count)
+        else:
+            self._occupied_cells[:] = b"\x00" * self.board_cell_count
+        self._snake_cell_indices = []
+        for segment in self.snake:
+            cell_index = self._cell_index_from_point(segment)
+            self._snake_cell_indices.append(cell_index)
+            self._occupied_cells[cell_index] = 1
+        if self._snake_cell_indices:
+            self._head_cell_index = int(self._snake_cell_indices[0])
+            self._tail_cell_index = int(self._snake_cell_indices[-1])
+        else:
+            self._head_cell_index = -1
+            self._tail_cell_index = -1
+
     def play_step(self, action=None, events=None, draw_frame=True, apply_pacing=True):
         """
         Advance the game by one frame.
@@ -228,6 +284,11 @@ class SnakeLogicEnv:
         previous_head = self.snake[0]
         self.snake.insert(0, self.head)
         self.snake_body_set.add(previous_head)
+        if not self._is_wall_collision(self.head):
+            next_head_index = self._cell_index_from_point(self.head)
+            self._snake_cell_indices.insert(0, next_head_index)
+            self._occupied_cells[next_head_index] = 1
+            self._head_cell_index = next_head_index
         reward = self.reward_config["step"]
         game_over = False
 
@@ -242,9 +303,19 @@ class SnakeLogicEnv:
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
+            if self._snake_cell_indices:
+                tail_cell_index = self._snake_cell_indices.pop()
+                if 0 <= tail_cell_index < self.board_cell_count:
+                    self._occupied_cells[tail_cell_index] = 0
+            self._tail_cell_index = (
+                int(self._snake_cell_indices[-1]) if self._snake_cell_indices else -1
+            )
             current_distance = _food_distance_for_env(self)
             reward += _food_progress_shaping(self, current_distance=current_distance)
             reward += _maybe_apply_loop_penalty(self, current_distance=current_distance)
+
+        if game_over and self.snake:
+            self._tail_cell_index = int(self._snake_cell_indices[-1]) if self._snake_cell_indices else -1
 
         if self.render and draw_frame:
             self.draw()
@@ -261,17 +332,33 @@ class SnakeLogicEnv:
         if self._is_wall_collision(point):
             return True
 
+        self._ensure_cell_cache()
         if point in self.snake_body_set:
             return True
 
         return False
 
     def raycast_free_steps(self, start, direction):
+        self._ensure_cell_cache()
         steps = 0
-        current = start
+        cell_x, cell_y = self._cell_coords_from_point(start)
         while True:
-            current = self._point_from_direction(current, direction)
-            if self._is_wall_collision(current) or current in self.snake_body_set:
+            if direction == Direction.RIGHT:
+                cell_x += 1
+            elif direction == Direction.LEFT:
+                cell_x -= 1
+            elif direction == Direction.UP:
+                cell_y -= 1
+            else:
+                cell_y += 1
+            if (
+                cell_x < 0
+                or cell_x >= self.board_cols
+                or cell_y < 0
+                or cell_y >= self.board_rows
+            ):
+                return steps
+            if self._occupied_cells[self._cell_index_from_coords(cell_x, cell_y)]:
                 return steps
             steps += 1
 
@@ -382,7 +469,7 @@ class SnakeGameAI(SnakeLogicEnv):
             self.sidebar_width = max(0, self.logical_w - self.board_w)
             
             self._real_display = pygame.display.set_mode((self.window_w, self.window_h), pygame.RESIZABLE)
-            self.display = pygame.Surface((self.logical_w, self.logical_h))
+            self.display = pygame.Surface((self.logical_w, self.logical_h)).convert()
             pygame.display.set_caption("Snake Deep RL Lab")
             self.title_font = pygame.font.SysFont("arial", 26, bold=True)
             self.font = pygame.font.SysFont("arial", 20)
@@ -392,6 +479,8 @@ class SnakeGameAI(SnakeLogicEnv):
             self._overlay_surface = pygame.Surface((self.board_w, self.board_h), pygame.SRCALPHA)
             glow_size = self.block_size * 3
             self._glow_surface = pygame.Surface((glow_size, glow_size), pygame.SRCALPHA)
+            self._board_background_surface = None
+            self._board_background_cache_key = None
         else:
             self.display = None
             self.title_font = None
@@ -400,6 +489,8 @@ class SnakeGameAI(SnakeLogicEnv):
             self.tiny_font = None
             self._overlay_surface = None
             self._glow_surface = None
+            self._board_background_surface = None
+            self._board_background_cache_key = None
 
         self.clock = pygame.time.Clock()
 
@@ -427,23 +518,7 @@ class SnakeGameAI(SnakeLogicEnv):
 
     def reset(self):
         """Reset the game so training can start a fresh episode."""
-        start_x = (self.board_w // 2 // self.block_size) * self.block_size
-        start_y = (self.board_h // 2 // self.block_size) * self.block_size
-
-        self.direction = Direction.RIGHT
-        self.head = Point(start_x, start_y)
-        self.snake = [
-            self.head,
-            Point(start_x - self.block_size, start_y),
-            Point(start_x - (2 * self.block_size), start_y),
-        ]
-        self.snake_body_set = set(self.snake[1:])
-
-        self.score = 0
-        self.food = None
-        self.frame_iteration = 0
-        self._place_food()
-        _reset_loop_tracking_state(self)
+        super().reset()
 
     def set_dashboard_data(self, data):
         self.dashboard_data = dict(data or {})
@@ -665,23 +740,37 @@ class SnakeGameAI(SnakeLogicEnv):
         self._draw_sidebar()
         self._draw_overlay_message()
         if hasattr(self, "_real_display") and self._real_display is not None:
-            pygame.transform.smoothscale(self.display, self._real_display.get_size(), self._real_display)
+            real_size = self._real_display.get_size()
+            logical_size = self.display.get_size()
+            if real_size == logical_size:
+                self._real_display.blit(self.display, (0, 0))
+            else:
+                pygame.transform.smoothscale(self.display, real_size, self._real_display)
         pygame.display.flip()
 
     def _draw_board_background(self):
-        board_rect = pygame.Rect(0, 0, self.board_w, self.board_h)
-        # Deep space premium navy/slate background
-        pygame.draw.rect(self.display, (16, 18, 24), board_rect)
+        cache_key = (int(self.board_w), int(self.board_h), int(self.block_size))
+        if (
+            self._board_background_surface is None
+            or self._board_background_cache_key != cache_key
+        ):
+            # This surface is static for a given board size, so we cache it and
+            # only rebuild when the logical board geometry changes.
+            board_surface = pygame.Surface((self.board_w, self.board_h)).convert()
+            board_rect = pygame.Rect(0, 0, self.board_w, self.board_h)
 
-        # Subtle grid lines
-        for x in range(0, self.board_w, self.block_size):
-            pygame.draw.line(self.display, (28, 32, 40), (x, 0), (x, self.board_h), 1)
-        for y in range(0, self.board_h, self.block_size):
-            pygame.draw.line(self.display, (28, 32, 40), (0, y), (self.board_w, y), 1)
+            pygame.draw.rect(board_surface, (16, 18, 24), board_rect)
+            for x in range(0, self.board_w, self.block_size):
+                pygame.draw.line(board_surface, (28, 32, 40), (x, 0), (x, self.board_h), 1)
+            for y in range(0, self.board_h, self.block_size):
+                pygame.draw.line(board_surface, (28, 32, 40), (0, y), (self.board_w, y), 1)
+            pygame.draw.rect(board_surface, (50, 60, 80), board_rect, width=2)
+            pygame.draw.rect(board_surface, (35, 45, 60), board_rect.inflate(4, 4), width=2)
 
-        # Premium outer board border
-        pygame.draw.rect(self.display, (50, 60, 80), board_rect, width=2)
-        pygame.draw.rect(self.display, (35, 45, 60), board_rect.inflate(4, 4), width=2)
+            self._board_background_surface = board_surface
+            self._board_background_cache_key = cache_key
+
+        self.display.blit(self._board_background_surface, (0, 0))
 
     def _draw_snake_and_food(self):
         # --- Draw Premium Food (Pulsing Glow) ---

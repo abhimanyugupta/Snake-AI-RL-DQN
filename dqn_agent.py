@@ -630,6 +630,10 @@ class DQNAgent:
         self.replay_buffer = ReplayBuffer(replay_capacity, len(self.STATE_LABELS))
         self.last_train_info["replay_capacity"] = int(self.replay_buffer.capacity)
         self.last_train_info["replay_beta"] = float(self.replay_buffer.priority_beta)
+        self._encoder_cell_capacity = 0
+        self._encoder_visit_stamps = None
+        self._encoder_queue = None
+        self._encoder_visit_counter = 0
         self._refresh_exploration_state()
 
     @property
@@ -1480,28 +1484,26 @@ class DQNAgent:
         return checkpoint.get("extra_state", {})
 
     def encode_state(self, game, out: np.ndarray | None = None) -> np.ndarray:
+        game._ensure_cell_cache()
         head = game.head
         block = game.block_size
         direction = game.direction
         snake = game.snake
-        head_key = self._point_key(head)
-        snake_body_keys = {self._point_key(segment) for segment in game.snake_body_set}
-        tail_key = self._point_key(snake[-1]) if snake else head_key
-        projected_tail_if_vacated = (
-            self._point_key(snake[-2]) if len(snake) > 1 else head_key
-        )
+        head_cell_x, head_cell_y = game._cell_coords_from_point(head)
 
         point_straight = self._next_point(head, direction, block)
         point_right = self._next_point(head, self._turn_right(direction), block)
         point_left = self._next_point(head, self._turn_left(direction), block)
 
-        max_x_steps = max(1, game.board_w // block)
-        max_y_steps = max(1, game.board_h // block)
+        max_x_steps = max(1, game.board_cols)
+        max_y_steps = max(1, game.board_rows)
         max_travel = float(max(max_x_steps, max_y_steps))
-        total_cells = float(max_x_steps * max_y_steps)
+        total_cells = float(game.board_cell_count)
 
         food_dx_cells = (game.food.x - game.head.x) / float(block)
         food_dy_cells = (game.food.y - game.head.y) / float(block)
+        food_cell_x = int(game.food.x // block) if game.food is not None else -1
+        food_cell_y = int(game.food.y // block) if game.food is not None else -1
 
         target = out
         if target is None:
@@ -1541,10 +1543,10 @@ class DQNAgent:
                 self._projected_move_features(
                     game,
                     move_direction,
-                    head_key=head_key,
-                    snake_body_keys=snake_body_keys,
-                    tail_key=tail_key,
-                    projected_tail_if_vacated=projected_tail_if_vacated,
+                    head_cell_x=head_cell_x,
+                    head_cell_y=head_cell_y,
+                    food_cell_x=food_cell_x,
+                    food_cell_y=food_cell_y,
                     total_cells=total_cells,
                     max_x_steps=max_x_steps,
                     max_y_steps=max_y_steps,
@@ -1768,175 +1770,222 @@ class DQNAgent:
         game,
         move_direction: Direction,
         *,
-        head_key: tuple[int, int],
-        snake_body_keys: set[tuple[int, int]],
-        tail_key: tuple[int, int],
-        projected_tail_if_vacated: tuple[int, int],
+        head_cell_x: int,
+        head_cell_y: int,
+        food_cell_x: int,
+        food_cell_y: int,
         total_cells: float,
         max_x_steps: int,
         max_y_steps: int,
     ) -> tuple[float, float, float, float]:
-        head = game.head
-        block = game.block_size
-        next_head = self._next_point(head, move_direction, block)
-        next_head_key = self._point_key(next_head)
-
-        snake = list(game.snake)
-        if self._is_out_of_bounds(next_head, game.board_w, game.board_h):
+        next_cell_x, next_cell_y = self._next_cell_coords(
+            head_cell_x, head_cell_y, move_direction
+        )
+        if (
+            next_cell_x < 0
+            or next_cell_x >= game.board_cols
+            or next_cell_y < 0
+            or next_cell_y >= game.board_rows
+        ):
             return 0.0, 0.0, 0.0, 1.0
 
-        will_eat = bool(game.food is not None and next_head == game.food)
-        if next_head_key in snake_body_keys and (will_eat or next_head_key != tail_key):
+        next_head_index = game._cell_index_from_coords(next_cell_x, next_cell_y)
+        food_index = (
+            game._cell_index_from_coords(food_cell_x, food_cell_y)
+            if food_cell_x >= 0 and food_cell_y >= 0
+            else -1
+        )
+        will_eat = bool(food_index >= 0 and next_head_index == food_index)
+        tail_index = int(game._tail_cell_index)
+        occupied = game._occupied_cells
+        if occupied[next_head_index] and (will_eat or next_head_index != tail_index):
             return 0.0, 0.0, 0.0, 1.0
 
-        projected_occupied = set(snake_body_keys)
-        projected_occupied.add(head_key)
         projected_length = len(game.snake) + (1 if will_eat else 0)
-        projected_tail_key = tail_key if will_eat else projected_tail_if_vacated
-        if not will_eat:
-            projected_occupied.discard(tail_key)
-
+        released_tail_index = -1 if will_eat else tail_index
+        if will_eat:
+            projected_tail_index = tail_index
+        elif len(game._snake_cell_indices) > 1:
+            projected_tail_index = int(game._snake_cell_indices[-2])
+        else:
+            projected_tail_index = int(game._head_cell_index)
         available_cells = max(
             1.0,
             float(total_cells) - float(projected_length) + 1.0,
         )
-        flood_blocked = set(projected_occupied)
-        flood_blocked.discard(next_head_key)
-        reachable_count = self._flood_fill_reachable_count(
-            next_head_key,
-            blocked=flood_blocked,
-            board_w=game.board_w,
-            board_h=game.board_h,
-            block_size=block,
+        reachable_count, tail_reachable_flag = self._flood_fill_projection(
+            game,
+            start_index=next_head_index,
+            target_index=projected_tail_index,
+            released_index=released_tail_index,
         )
         area_ratio = min(1.0, float(reachable_count) / float(available_cells))
-
-        tail_blocked = set(projected_occupied)
-        tail_blocked.discard(next_head_key)
-        tail_blocked.discard(projected_tail_key)
-        tail_reachable = float(
-            self._path_exists(
-                next_head_key,
-                projected_tail_key,
-                blocked=tail_blocked,
-                board_w=game.board_w,
-                board_h=game.board_h,
-                block_size=block,
-            )
-        )
+        tail_reachable = float(tail_reachable_flag)
 
         open_neighbors = self._open_neighbors_ratio(
-            next_head,
+            next_head_index,
             move_direction,
-            projected_occupied,
-            board_w=game.board_w,
-            board_h=game.board_h,
-            block_size=block,
+            game=game,
+            released_index=released_tail_index,
         )
         food_distance_next = self._food_distance_ratio(
-            next_head,
-            game.food,
+            next_cell_x,
+            next_cell_y,
+            food_cell_x,
+            food_cell_y,
             max_x_steps=max_x_steps,
             max_y_steps=max_y_steps,
-            block_size=block,
         )
         return area_ratio, tail_reachable, open_neighbors, food_distance_next
 
-    def _flood_fill_reachable_count(
-        self,
-        start_key: tuple[int, int],
-        *,
-        blocked: set[tuple[int, int]],
-        board_w: int,
-        board_h: int,
-        block_size: int,
-    ) -> int:
-        queue = deque([start_key])
-        visited = {start_key}
-        while queue:
-            current_key = queue.popleft()
-            current_point = Point(*current_key)
-            for neighbor in self._cardinal_neighbors(current_point, block_size):
-                neighbor_key = self._point_key(neighbor)
-                if neighbor_key in visited or neighbor_key in blocked:
-                    continue
-                if self._is_out_of_bounds(neighbor, board_w, board_h):
-                    continue
-                visited.add(neighbor_key)
-                queue.append(neighbor_key)
-        return len(visited)
+    def _ensure_encoder_scratch(self, cell_count: int) -> None:
+        if cell_count <= self._encoder_cell_capacity:
+            return
+        self._encoder_visit_stamps = np.zeros(cell_count, dtype=np.int32)
+        self._encoder_queue = np.empty(cell_count, dtype=np.int32)
+        self._encoder_cell_capacity = int(cell_count)
+        self._encoder_visit_counter = 0
 
-    def _path_exists(
+    def _next_encoder_visit_stamp(self) -> int:
+        self._encoder_visit_counter += 1
+        if self._encoder_visit_counter >= np.iinfo(np.int32).max:
+            self._encoder_visit_stamps.fill(0)
+            self._encoder_visit_counter = 1
+        return int(self._encoder_visit_counter)
+
+    def _flood_fill_projection(
         self,
-        start_key: tuple[int, int],
-        target_key: tuple[int, int],
+        game,
         *,
-        blocked: set[tuple[int, int]],
-        board_w: int,
-        board_h: int,
-        block_size: int,
-    ) -> bool:
-        if start_key == target_key:
-            return True
-        queue = deque([start_key])
-        visited = {start_key}
-        while queue:
-            current_key = queue.popleft()
-            current_point = Point(*current_key)
-            for neighbor in self._cardinal_neighbors(current_point, block_size):
-                neighbor_key = self._point_key(neighbor)
-                if neighbor_key == target_key:
-                    return True
-                if neighbor_key in visited or neighbor_key in blocked:
-                    continue
-                if self._is_out_of_bounds(neighbor, board_w, board_h):
-                    continue
-                visited.add(neighbor_key)
-                queue.append(neighbor_key)
-        return False
+        start_index: int,
+        target_index: int,
+        released_index: int,
+    ) -> tuple[int, bool]:
+        cell_count = int(game.board_cell_count)
+        self._ensure_encoder_scratch(cell_count)
+        stamp = self._next_encoder_visit_stamp()
+        visited = self._encoder_visit_stamps
+        queue = self._encoder_queue
+        occupied = game._occupied_cells
+        board_cols = int(game.board_cols)
+        board_rows = int(game.board_rows)
+        head = 0
+        tail = 0
+        queue[tail] = int(start_index)
+        tail += 1
+        visited[start_index] = stamp
+        reachable_count = 0
+        target_reached = start_index == target_index
+
+        while head < tail:
+            current_index = int(queue[head])
+            head += 1
+            reachable_count += 1
+            cell_x = current_index % board_cols
+            cell_y = current_index // board_cols
+            if cell_x + 1 < board_cols:
+                neighbor_index = current_index + 1
+                if neighbor_index == target_index:
+                    target_reached = True
+                if visited[neighbor_index] != stamp and (
+                    not occupied[neighbor_index] or neighbor_index == released_index
+                ):
+                    visited[neighbor_index] = stamp
+                    queue[tail] = neighbor_index
+                    tail += 1
+            if cell_x > 0:
+                neighbor_index = current_index - 1
+                if neighbor_index == target_index:
+                    target_reached = True
+                if visited[neighbor_index] != stamp and (
+                    not occupied[neighbor_index] or neighbor_index == released_index
+                ):
+                    visited[neighbor_index] = stamp
+                    queue[tail] = neighbor_index
+                    tail += 1
+            if cell_y + 1 < board_rows:
+                neighbor_index = current_index + board_cols
+                if neighbor_index == target_index:
+                    target_reached = True
+                if visited[neighbor_index] != stamp and (
+                    not occupied[neighbor_index] or neighbor_index == released_index
+                ):
+                    visited[neighbor_index] = stamp
+                    queue[tail] = neighbor_index
+                    tail += 1
+            if cell_y > 0:
+                neighbor_index = current_index - board_cols
+                if neighbor_index == target_index:
+                    target_reached = True
+                if visited[neighbor_index] != stamp and (
+                    not occupied[neighbor_index] or neighbor_index == released_index
+                ):
+                    visited[neighbor_index] = stamp
+                    queue[tail] = neighbor_index
+                    tail += 1
+
+        return reachable_count, bool(target_reached)
 
     def _open_neighbors_ratio(
         self,
-        head: Point,
+        head_index: int,
         direction: Direction,
-        occupied: set[tuple[int, int]],
         *,
-        board_w: int,
-        board_h: int,
-        block_size: int,
+        game,
+        released_index: int,
     ) -> float:
         legal_directions = (
             direction,
             self._turn_right(direction),
             self._turn_left(direction),
         )
+        head_cell_x, head_cell_y = game._cell_coords_from_index(head_index)
         open_count = 0
         for next_direction in legal_directions:
-            neighbor = self._next_point(head, next_direction, block_size)
-            neighbor_key = self._point_key(neighbor)
-            if self._is_out_of_bounds(neighbor, board_w, board_h):
+            neighbor_x, neighbor_y = self._next_cell_coords(
+                head_cell_x, head_cell_y, next_direction
+            )
+            if (
+                neighbor_x < 0
+                or neighbor_x >= game.board_cols
+                or neighbor_y < 0
+                or neighbor_y >= game.board_rows
+            ):
                 continue
-            if neighbor_key in occupied:
+            neighbor_index = game._cell_index_from_coords(neighbor_x, neighbor_y)
+            if game._occupied_cells[neighbor_index] and neighbor_index != released_index:
                 continue
             open_count += 1
         return float(open_count / 3.0)
 
     def _food_distance_ratio(
         self,
-        point: Point,
-        food: Point | None,
+        cell_x: int,
+        cell_y: int,
+        food_cell_x: int,
+        food_cell_y: int,
         *,
         max_x_steps: int,
         max_y_steps: int,
-        block_size: int,
     ) -> float:
-        if food is None:
+        if food_cell_x < 0 or food_cell_y < 0:
             return 0.0
         max_distance = float(max(1, max_x_steps + max_y_steps))
-        distance_in_cells = (abs(food.x - point.x) + abs(food.y - point.y)) / float(
-            max(1, block_size)
+        distance_in_cells = float(
+            abs(food_cell_x - cell_x) + abs(food_cell_y - cell_y)
         )
         return float(distance_in_cells / max_distance)
+
+    def _next_cell_coords(
+        self, cell_x: int, cell_y: int, direction: Direction
+    ) -> tuple[int, int]:
+        if direction == Direction.RIGHT:
+            return (cell_x + 1, cell_y)
+        if direction == Direction.LEFT:
+            return (cell_x - 1, cell_y)
+        if direction == Direction.UP:
+            return (cell_x, cell_y - 1)
+        return (cell_x, cell_y + 1)
 
     def _cardinal_neighbors(self, point: Point, block_size: int) -> tuple[Point, Point, Point, Point]:
         return (

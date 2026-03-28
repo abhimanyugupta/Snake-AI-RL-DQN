@@ -32,6 +32,11 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - resume or visualizer loads now reject old 18-feature checkpoints with a clear schema-mismatch error
 - parallel mode now defaults to `32` envs on CUDA instead of `64`
 - parallel warmup is now `4096` instead of `10000` so CUDA updates start earlier
+- the safe performance pass is now in place:
+  - the 30-feature encoder uses cached cell-grid occupancy data plus one projected flood-fill per move
+  - replay capture stores compact logical frame snapshots and reconstructs replay views lazily
+  - single-mode deep metrics now flush in buffered batches like parallel mode
+  - the render path caches the static board background and avoids `smoothscale` when the logical and real sizes already match
 - older bullets below that mention `No Render` describe superseded behavior and should not be treated as current
 
 ## Current smoke-test commands
@@ -68,6 +73,11 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - `Results`, `Overview`, `Network`, `Algorithm`, then back to `Results` all redraw cleanly
   - the new results slider updates the selected episode index
 - verified in-sandbox that `py_compile` still passes after the Manhattan-shaping patch
+- verified after the safe performance pass:
+  - `py_compile` passes for `app_core.py`, `dashboard.py`, `dqn_agent.py`, `snake_game.py`, `train.py`, and `visualizer.py`
+  - encoder/replay/perf-helper smoke: `safe_perf_smoke_ok`
+  - dummy-display render-cache smoke: `render_cache_smoke_ok`
+  - dummy-display compact replay reconstruction smoke: `replay_reconstruct_smoke_ok`
 - verified by direct code inspection that both snake environments now:
   - keep death and food rewards unchanged
   - add Manhattan shaping only on ordinary non-terminal moves
