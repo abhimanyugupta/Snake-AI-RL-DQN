@@ -26,6 +26,7 @@ from snake_game import Direction, Point
 DEFAULT_HIDDEN_LAYERS = [256, 256, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
+DEFAULT_LEARNING_RATE = 3e-4
 DEFAULT_STALL_THRESHOLD = 150
 DEFAULT_REPLAY_CAPACITY = 200_000
 DEFAULT_PRIORITY_ALPHA = 0.4
@@ -544,7 +545,7 @@ class DQNAgent:
 
     def __init__(
         self,
-        learning_rate: float = 1e-3,
+        learning_rate: float = DEFAULT_LEARNING_RATE,
         gamma: float = 0.9,
         epsilon: float = 1.0,
         epsilon_min: float = 0.02,

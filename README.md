@@ -91,6 +91,7 @@ Notes:
 - repeated spin-loop behavior now gets a small automatic penalty so the snake is nudged away from cycling in place
 - non-terminal moves now get a small Manhattan-distance shaping term (`0.05 * (previous_distance - current_distance)`) so the snake gets a denser signal for moving toward food
 - the DQN input now includes projected move-safety features for each relative action: reachable area, tail reachability, open exits, and next-step food distance
+- fresh runs now default the Adam learning rate to `3e-4` instead of `1e-3` for better stability with the richer state and n-step targets
 - resume restores trainer-mode metadata from checkpoints unless you explicitly override it on the CLI
 - when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card explains when replay is unavailable and what will be captured next

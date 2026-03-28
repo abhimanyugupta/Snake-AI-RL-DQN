@@ -28,6 +28,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - the trainer now uses fixed 3-step returns on top of Double DQN
 - the trainer now uses hybrid replay instead of pure prioritized replay
 - the DQN state encoder now uses 30 features instead of the older 18-feature schema
+- fresh runs now default the DQN learning rate to `3e-4` instead of `1e-3`
 - resume or visualizer loads now reject old 18-feature checkpoints with a clear schema-mismatch error
 - parallel mode now defaults to `32` envs on CUDA instead of `64`
 - parallel warmup is now `4096` instead of `10000` so CUDA updates start earlier
