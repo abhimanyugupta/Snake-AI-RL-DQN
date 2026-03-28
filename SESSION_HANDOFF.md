@@ -25,6 +25,7 @@ Build a self-contained Deep RL Snake training lab in this folder, with:
 - the finished-window loop has extra defensive rebuilding so post-run tab clicks do not immediately tear down the window on view refresh errors
 - non-terminal moves now get a small Manhattan-distance shaping term so the reward is denser when the snake moves toward food
 - the trainer now uses Double DQN target selection instead of the older plain DQN target
+- the trainer now uses fixed 3-step returns on top of Double DQN
 - the trainer now uses hybrid replay instead of pure prioritized replay
 - the DQN state encoder now uses 30 features instead of the older 18-feature schema
 - resume or visualizer loads now reject old 18-feature checkpoints with a clear schema-mismatch error
@@ -81,6 +82,11 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - mixes `70%` uniform samples with `30%` prioritized samples
   - updates priorities from absolute TD error
   - falls back safely when older checkpoints do not contain priority data
+- verified in-sandbox that the 3-step-return patch compiles cleanly
+- verified by direct code inspection that training now:
+  - aggregates fixed 3-step returns before replay insertion
+  - keeps one pending n-step queue per active episode stream
+  - uses the stored n-step horizon in the Double DQN bootstrap target
 - verified in-sandbox that the 30-feature state upgrade compiles cleanly
 - verified with a local encoder smoke that:
   - `encode_state(...)` now returns 30 values
@@ -119,6 +125,11 @@ Use these current commands instead of the older `--no-render` examples lower in 
   - the policy net now chooses the next action
   - the target net evaluates that chosen next action
   - the teaching text now describes Double DQN instead of plain Bellman max-over-target updates
+- upgraded replay insertion from 1-step transitions to fixed 3-step returns:
+  - replay now stores aggregated discounted rewards plus the n-step horizon
+  - single mode keeps one short pending queue for the active episode
+  - parallel mode keeps one short pending queue per worker env and flushes them on termination
+  - checkpoints now carry optional n-step metadata and pending queue state
 - upgraded replay from pure prioritized sampling to hybrid replay:
   - batches now mix `70%` uniform and `30%` prioritized samples
   - new transitions enter at `max(median_priority, 0.5 * max_priority)` instead of raw max priority

@@ -1483,7 +1483,7 @@ def train_parallel_mode(
         if game.quit_requested:
             break
 
-        agent.remember_batch(
+        emitted_transitions = agent.remember_batch(
             env_states,
             action_indices,
             rewards_batch,
@@ -1495,7 +1495,7 @@ def train_parallel_mode(
         collect_diagnostics = bool(completed_records or frame_due or (bulk_iteration % 16 == 0))
         train_info = agent.train_step(
             collect_diagnostics=collect_diagnostics,
-            num_new_transitions=parallel_envs,
+            num_new_transitions=emitted_transitions,
         )
         session_perf["updates"] += int(train_info.get("update_count", 0))
 
@@ -2206,7 +2206,7 @@ def train_session(
                 )
                 episode_reward += reward
                 next_state = agent.encode_state(game)
-                agent.remember(
+                emitted_transitions = agent.remember(
                     state=state,
                     action_index=action_info["action_index"],
                     reward=reward,
@@ -2217,7 +2217,10 @@ def train_session(
                 collect_diagnostics = bool(
                     not stripped_episode or game_over or (step_count % 64 == 0)
                 )
-                train_info = agent.train_step(collect_diagnostics=collect_diagnostics)
+                train_info = agent.train_step(
+                    collect_diagnostics=collect_diagnostics,
+                    num_new_transitions=emitted_transitions,
+                )
                 if train_info.get("did_update"):
                     session_perf["updates"] += 1
                 state = next_state

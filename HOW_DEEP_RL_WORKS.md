@@ -38,10 +38,11 @@ Each step of training does this:
 2. choose an action
 3. play that action in the game
 4. get reward and next state
-5. store that transition in hybrid replay memory
+5. aggregate a short 3-step return and store that transition in hybrid replay memory
 6. sample a mixed mini-batch from memory
 7. choose the next action with the policy network, then evaluate that action with the target network
-8. occasionally copy the policy network into the target network
+8. bootstrap from that point using the Double DQN target
+9. occasionally copy the policy network into the target network
 
 ## Why hybrid replay matters
 
@@ -64,6 +65,11 @@ This project now uses Double DQN:
 - the target network scores that chosen action
 
 That usually makes targets less optimistic and helps training plateau less often.
+
+## Why 3-step returns help
+
+Snake often needs a few safe moves before the payoff becomes obvious.
+This project now uses fixed 3-step returns so food progress and trap avoidance can push value backward across several moves instead of only one.
 
 ## How device choice works here
 

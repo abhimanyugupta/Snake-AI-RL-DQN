@@ -913,6 +913,7 @@ class TrainingDashboard:
         replay_summary = (
             f"{replay_status.get('mode', 'Hybrid')} | "
             f"{replay_status.get('mix', '70U/30P')} | "
+            f"n-step {replay_status.get('n_step', 1)} | "
             f"cap {replay_status.get('capacity', 0)} | "
             f"beta {replay_status.get('beta', 0.0):.2f}"
         )
@@ -993,7 +994,7 @@ class TrainingDashboard:
             help_lines = [
                 "[accent]Overview: board on the left, current decision on the right, history below.",
                 "[accent]Network: live forward pass across the configurable hidden layers.",
-                "[accent]Algorithm: Double-DQN target selection, hybrid replay memory, and target-net update flow.",
+                "[accent]Algorithm: Double-DQN target selection, 3-step returns, hybrid replay memory, and target-net update flow.",
                 "[accent]Single mode is for learning and inspection; Parallel mode is for speed, especially on GPU.",
                 f"[accent]Device target: {self.selected_device_preference.upper()} | Active runtime: {agent.device_label}",
             ]
@@ -1211,6 +1212,7 @@ class TrainingDashboard:
             ),
             f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
             f"Replay: {replay_summary}",
+            f"n-step returns: {replay_status.get('n_step', 1)}",
             f"Architecture: {agent.architecture_label}",
             f"State features: {len(agent.STATE_LABELS)}",
             f"Latest loss: {self._format_metric(train_info.get('loss'))}",
@@ -1401,6 +1403,7 @@ class TrainingDashboard:
                     "lines": [
                         f"Replay buffer size: {train_info.get('buffer_size', 0)}",
                         f"Replay mode: {replay_status.get('mode', 'Hybrid')} {replay_status.get('mix', '70U/30P')} | beta {replay_status.get('beta', 0.0):.2f}",
+                        f"n-step returns: {replay_status.get('n_step', 1)}",
                         f"Loss: {self._format_metric(train_info.get('loss'))}",
                         f"TD error: {self._format_metric(train_info.get('td_error'))}",
                         f"Epsilon: {agent.epsilon:.3f}",
@@ -1416,8 +1419,8 @@ class TrainingDashboard:
                 "lines": [
                     f"1. Observe {len(agent.STATE_LABELS)} encoded features, including local cues plus projected move safety.",
                     f"2. Choose {action_info['action_label']} with {action_info['decision_type']}.",
-                    "3. Store (state, action, reward, next_state) in hybrid replay memory.",
-                    "4. Sample a mixed 70U/30P batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate.",
+                    f"3. Aggregate {replay_status.get('n_step', 1)}-step returns before storing the transition in hybrid replay memory.",
+                    "4. Sample a mixed 70U/30P batch, pick next actions with the policy net, evaluate them with the target net, then backpropagate the n-step target.",
                 ],
             },
             {
@@ -1430,13 +1433,14 @@ class TrainingDashboard:
                 ],
             },
             {
-                "title": "Double DQN Update",
+                "title": "Double DQN + N-Step Update",
                 "lines": [
                     f"Predicted Q: {self._format_metric(train_info.get('example_predicted_q'))}",
                     f"Target Q: {self._format_metric(train_info.get('example_target_q'))}",
                     f"TD error: {self._format_metric(train_info.get('example_td_error'))}",
                     f"Loss: {self._format_metric(train_info.get('loss'))}",
                     f"Replay beta: {replay_status.get('beta', 0.0):.2f}",
+                    f"N-step horizon: {replay_status.get('n_step', 1)}",
                 ],
             },
             {
@@ -1444,6 +1448,7 @@ class TrainingDashboard:
                 "lines": [
                     "Hybrid replay keeps some surprise-driven sampling without letting noisy transitions dominate every batch.",
                     "Double DQN reduces over-optimistic targets by splitting action choice from action evaluation.",
+                    f"{replay_status.get('n_step', 1)}-step returns push food-seeking and trap-avoidance credit back across several moves instead of only one step.",
                     "Projected move features add reachable-area, tail-reachability, and local-exit context before the snake commits to a turn.",
                     f"Epsilon is {agent.epsilon:.3f}, so the agent still explores when needed.",
                     f"The current MLP architecture is {agent.architecture_label}.",

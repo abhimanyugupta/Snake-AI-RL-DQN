@@ -9,7 +9,7 @@ It also supports a separate **parallel training mode** for higher-throughput bul
 - the richer 30-feature state vector seen by the DQN
 - live action selection and Q-values
 - hybrid replay-memory driven training
-- Double-DQN target updates
+- Double-DQN target updates with 3-step returns
 - target-network syncing
 - a local tabular baseline for comparison
 - a live neural-network view across configurable hidden layers
@@ -83,6 +83,7 @@ Notes:
 - `--eval-tail-episodes` controls how many final rendered evaluation runs are shown and replayable in parallel mode
 - if `--parallel-envs` is omitted, parallel mode now defaults to `32` on CUDA and `16` on CPU
 - replay is now hybrid replay, mixing `70%` uniform samples with `30%` priority-weighted samples
+- replayed transitions now use a fixed 3-step return target before they enter memory
 - replay capacity now defaults to `200000`
 - parallel mode now uses a larger warmup (`4096`) and a batch size of `512` to improve sample efficiency without delaying GPU updates as long
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
@@ -109,7 +110,7 @@ python visualizer.py --checkpoint dqn_checkpoint.pt --metrics-log training_metri
 
 - `Overview` - KPI cards, decision summary, controls, comparison graph, and top active features
 - `Network` - layer-by-layer heatmaps plus compact connection-strength blocks
-- `Algorithm` - short cards for the RL loop, current transition, Double DQN update, and why hybrid replay/target networks help
+- `Algorithm` - short cards for the RL loop, current transition, Double DQN + 3-step update, and why hybrid replay/target networks help
 
 ## Controls
 
