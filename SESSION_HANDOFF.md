@@ -523,3 +523,15 @@ Check for:
   - `E:\Vibe Coding\Codex\.uv-python\cpython-3.11.15-windows-x86_64-none\python.exe`
 - `py_compile` worked through that interpreter
 - dependency installation and real runtime verification were not completed in this sandbox
+## Latest Pass
+
+- Added agent-side soft target updates (`tau=0.005`) plus evaluation/LR-decay bookkeeping in `dqn_agent.py`.
+- Added periodic greedy evaluation during parallel training every `200` completed episodes across `5` eval runs, plus best-model restore before final checkpoint/results in `app_core.py`.
+- Updated read-only snapshot/results summary text in `dashboard.py` to show current LR, latest/best eval average, target-update mode, and replay/update ratio without moving the GUI layout.
+- CUDA parallel schedule is now `batch=1024`, `warmup=4096`, `update_every=64`, `gradient_steps=8`; CPU parallel remains `512 / 4096 / 32 / 2`.
+
+## Validation Focus
+
+- Check that periodic greedy eval does not freeze the UI unexpectedly in long parallel runs.
+- Confirm the final exported checkpoint matches the best-eval plateau rather than the final regressed weights.
+- Watch whether the denser CUDA replay schedule materially increases `updates/sec` and GPU utilization after warmup.

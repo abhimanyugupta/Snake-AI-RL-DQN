@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import argparse
 import copy
 import os
@@ -44,6 +46,26 @@ DEFAULT_REWARD_CONFIG = {"food": 10.0, "death": -10.0, "step": 0.0}
 DEFAULT_TRAINER_MODE = "single"
 SUPPORTED_TRAINER_MODES = ("single", "parallel")
 SUMMARY_IMAGE_NAME = "training_summary.png"
+PARALLEL_EVAL_INTERVAL_EPISODES = 200
+PARALLEL_EVAL_ROUNDS = 5
+DEFAULT_EVAL_TAIL_EPISODES = 5
+PARALLEL_CPU_BATCH_SIZE = 512
+PARALLEL_CUDA_BATCH_SIZE = 1024
+PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS = 32
+PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS = 64
+PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE = 2
+PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE = 8
+PARALLEL_WARMUP_SIZE = 4_096
+PARALLEL_EVAL_INTERVAL_EPISODES = 200
+PARALLEL_EVAL_ROUNDS = 5
+DEFAULT_EVAL_TAIL_EPISODES = 5
+PARALLEL_CPU_BATCH_SIZE = 512
+PARALLEL_CUDA_BATCH_SIZE = 1024
+PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS = 32
+PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS = 64
+PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE = 2
+PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE = 8
+PARALLEL_WARMUP_SIZE = 4_096
 
 
 def parse_hidden_layers_arg(raw_value):
@@ -123,6 +145,66 @@ def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_l
     return list(DEFAULT_HIDDEN_LAYERS)
 
 
+def _clone_torch_state_dict_to_cpu(state_dict):
+    cloned_state = {}
+    for key, value in dict(state_dict or {}).items():
+        if hasattr(value, "detach"):
+            cloned_state[key] = value.detach().cpu().clone()
+        else:
+            cloned_state[key] = copy.deepcopy(value)
+    return cloned_state
+
+
+def snapshot_agent_weights(agent):
+    return {
+        "policy_state_dict": _clone_torch_state_dict_to_cpu(agent.policy_net.state_dict()),
+        "target_state_dict": _clone_torch_state_dict_to_cpu(agent.target_net.state_dict()),
+    }
+
+
+def restore_agent_weights(agent, weight_snapshot):
+    if not weight_snapshot:
+        return False
+
+    policy_state = weight_snapshot.get("policy_state_dict")
+    target_state = weight_snapshot.get("target_state_dict") or policy_state
+    if policy_state:
+        agent.policy_net.load_state_dict(policy_state)
+    if target_state:
+        agent.target_net.load_state_dict(target_state)
+    else:
+        agent.target_net.load_state_dict(agent.policy_net.state_dict())
+    agent.target_net.eval()
+    return True
+
+
+def initialize_best_eval_tracking(agent, checkpoint_extra_state):
+    best_eval_state = dict((checkpoint_extra_state or {}).get("best_eval", {}))
+    agent.best_eval_avg = float(best_eval_state.get("best_eval_avg", float("-inf")))
+    agent.best_eval_round = dict(best_eval_state.get("best_eval_round", {}))
+    agent.best_eval_snapshot = best_eval_state.get("best_eval_snapshot")
+    return best_eval_state
+
+
+def get_best_eval_state(agent):
+    return {
+        "best_eval_avg": float(getattr(agent, "best_eval_avg", float("-inf"))),
+        "best_eval_round": copy.deepcopy(getattr(agent, "best_eval_round", {})),
+        "best_eval_snapshot": copy.deepcopy(getattr(agent, "best_eval_snapshot", None)),
+    }
+
+
+def update_best_eval_tracking(agent, eval_average, eval_round_summary):
+    current_best = float(getattr(agent, "best_eval_avg", float("-inf")))
+    if float(eval_average) <= current_best:
+        return False
+
+    agent.best_eval_avg = float(eval_average)
+    agent.best_eval_round = dict(eval_round_summary or {})
+    agent.best_eval_snapshot = snapshot_agent_weights(agent)
+    return True
+
+
 def hold_training_window_open(
     game,
     dashboard,
@@ -136,7 +218,8 @@ def hold_training_window_open(
     fast_mode_requested=False,
     fast_mode_effective=False,
     fast_tail_episodes=5,
-    eval_tail_episodes=3,
+    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
+    eval_interval_episodes=PARALLEL_EVAL_INTERVAL_EPISODES,
     parallel_phase="bulk",
 ):
     pygame.event.clear()
@@ -247,6 +330,9 @@ def hold_training_window_open(
         return
 
     while not game.quit_requested:
+        if completed_in_session() >= next_eval_checkpoint:
+            if not run_due_periodic_evals():
+                break
         events = pygame.event.get()
         scaled_events = game.scale_events(events)
         game.handle_system_events(events)
@@ -437,6 +523,136 @@ def run_tabular_baseline(episodes, reward_config, metrics_log_path):
     return build_history(baseline_entries)
 
 
+def _clone_torch_state_dict_to_cpu(state_dict):
+    if not isinstance(state_dict, dict):
+        return None
+    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
+
+
+def snapshot_agent_weights(agent):
+    return {
+        "policy_state_dict": _clone_torch_state_dict_to_cpu(agent.policy_net.state_dict()),
+        "target_state_dict": _clone_torch_state_dict_to_cpu(agent.target_net.state_dict()),
+    }
+
+
+def restore_agent_weights(agent, weight_snapshot):
+    if not isinstance(weight_snapshot, dict):
+        return False
+    policy_state_dict = weight_snapshot.get("policy_state_dict")
+    if not isinstance(policy_state_dict, dict):
+        return False
+    agent.policy_net.load_state_dict(policy_state_dict)
+    target_state_dict = weight_snapshot.get("target_state_dict")
+    if isinstance(target_state_dict, dict):
+        agent.target_net.load_state_dict(target_state_dict)
+    else:
+        agent.sync_target_network()
+    return True
+
+
+def initialize_best_eval_tracking(agent, checkpoint_extra_state):
+    best_eval_state = {}
+    if isinstance(checkpoint_extra_state, dict):
+        best_eval_state = checkpoint_extra_state.get("best_eval", {}) or {}
+    agent.best_eval_snapshot = copy.deepcopy(getattr(agent, "_best_model_snapshot", None))
+    if not isinstance(agent.best_eval_snapshot, dict):
+        agent.best_eval_snapshot = None
+    agent.best_eval_round = int(best_eval_state.get("round_index", -1))
+    agent.best_eval_restored = False
+    agent.latest_eval_summary = {}
+    return best_eval_state
+
+
+def get_best_eval_state(agent):
+    return {
+        "average_score": float(getattr(agent, "best_eval_avg", float("-inf"))),
+        "episode": int(getattr(agent, "best_eval_episode", -1)),
+        "round_index": int(getattr(agent, "best_eval_round", -1)),
+        "restored": bool(getattr(agent, "best_eval_restored", False)),
+    }
+
+
+def update_best_eval_tracking(agent, eval_average, eval_round_summary):
+    eval_round_summary = dict(eval_round_summary or {})
+    episode_number = int(eval_round_summary.get("completed_training_episodes", getattr(agent, "n_games", 0)))
+    status = agent.record_evaluation_result(episode_number, eval_average)
+    agent.latest_eval_summary = {
+        **eval_round_summary,
+        **status,
+    }
+    if status.get("improved"):
+        agent.best_eval_snapshot = copy.deepcopy(getattr(agent, "_best_model_snapshot", None))
+        agent.best_eval_round = int(eval_round_summary.get("cycle_index", getattr(agent, "best_eval_round", -1)))
+    return status
+
+
+def run_parallel_greedy_evaluation(
+    agent,
+    dashboard,
+    *,
+    num_episodes=PARALLEL_EVAL_ROUNDS,
+    cycle_index=0,
+    completed_training_episodes=0,
+):
+    eval_env = SnakeLogicEnv(speed=0)
+    eval_env.set_reward_config(dict(dashboard.reward_config))
+    eval_scores = []
+    eval_episode_rewards = []
+    eval_episode_steps = []
+
+    try:
+        for _ in range(max(1, int(num_episodes))):
+            eval_env.reset()
+            state = agent.encode_state(eval_env)
+            episode_reward = 0.0
+            step_count = 0
+            score = 0
+
+            while True:
+                action_info = agent.get_action_details(state, greedy=True)
+                reward, game_over, score = eval_env.play_step(
+                    action_info["action"],
+                    events=[],
+                    draw_frame=False,
+                    apply_pacing=False,
+                )
+                episode_reward += reward
+                step_count += 1
+                if game_over:
+                    break
+                state = agent.encode_state(eval_env)
+
+            eval_scores.append(int(score))
+            eval_episode_rewards.append(float(episode_reward))
+            eval_episode_steps.append(int(step_count))
+
+        eval_average = float(sum(eval_scores) / len(eval_scores)) if eval_scores else float("-inf")
+        status = update_best_eval_tracking(
+            agent,
+            eval_average,
+            {
+                "mode": "periodic",
+                "cycle_index": int(cycle_index),
+                "scores": list(eval_scores),
+                "episode_rewards": list(eval_episode_rewards),
+                "episode_steps": list(eval_episode_steps),
+                "average_score": float(eval_average),
+                "completed_training_episodes": int(completed_training_episodes),
+                "eval_tail_episodes": int(max(1, int(num_episodes))),
+            },
+        )
+        return {
+            "scores": list(eval_scores),
+            "episode_rewards": list(eval_episode_rewards),
+            "episode_steps": list(eval_episode_steps),
+            "average_score": float(eval_average),
+            "status": status,
+        }
+    finally:
+        eval_env.close()
+
+
 def save_checkpoint(
     agent,
     checkpoint_path,
@@ -446,7 +662,8 @@ def save_checkpoint(
     *,
     trainer_mode="single",
     parallel_envs=8,
-    eval_tail_episodes=3,
+    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
+    eval_interval_episodes=PARALLEL_EVAL_INTERVAL_EPISODES,
 ):
     extra_state = {
         "reward_config": dashboard.reward_config,
@@ -460,10 +677,12 @@ def save_checkpoint(
         },
         "metrics_log_path": metrics_log_path,
         "last_transition": dict(last_transition or {}),
+        "best_eval": get_best_eval_state(agent),
         "trainer_config": {
             "mode": str(trainer_mode or DEFAULT_TRAINER_MODE).strip().lower(),
             "parallel_envs": int(max(1, parallel_envs)),
             "eval_tail_episodes": int(max(1, eval_tail_episodes)),
+            "eval_interval_episodes": int(max(1, eval_interval_episodes)),
             "stall_threshold": int(max(1, dashboard.get_stall_threshold())),
         },
     }
@@ -555,7 +774,7 @@ def build_recent_replays_panel(
     fast_mode_requested,
     fast_mode_effective,
     fast_tail_episodes,
-    eval_tail_episodes=3,
+    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
     parallel_phase="bulk",
     training_completed=False,
 ):
@@ -765,11 +984,12 @@ def build_training_context(
     trainer_mode="single",
     parallel_envs=1,
     parallel_phase="single",
-    eval_tail_episodes=3,
+    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
     fast_mode_requested=False,
     fast_mode_effective=False,
     fast_tail_episodes=5,
     episodes_remaining=0,
+    **extra_context,
 ):
     return {
         "mode_label": mode_label,
@@ -784,6 +1004,7 @@ def build_training_context(
         "fast_mode_effective": bool(fast_mode_effective),
         "fast_tail_episodes": int(fast_tail_episodes),
         "episodes_remaining": int(max(0, episodes_remaining)),
+        **extra_context,
     }
 
 
@@ -936,6 +1157,10 @@ def build_post_run_base_view(
         fast_mode_effective=bool(dashboard.fast_mode_toggle.value and trainer_mode == "single"),
         fast_tail_episodes=fast_tail_episodes,
         episodes_remaining=0,
+        eval_scope="final_post_run",
+        best_eval_avg=float(getattr(agent, "best_eval_avg", float("-inf"))),
+        best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
+        best_eval_restored=bool(getattr(agent, "best_eval_snapshot", None)),
     )
     return build_dashboard_frame(
         game=game,
@@ -1133,7 +1358,7 @@ def ensure_baseline_history(
 
 
 def resolve_parallel_batch_size(device_type):
-    return 512
+    return PARALLEL_CUDA_BATCH_SIZE if str(device_type).strip().lower() == "cuda" else PARALLEL_CPU_BATCH_SIZE
 
 
 def resolve_parallel_env_count(device_type, requested_envs):
@@ -1142,15 +1367,28 @@ def resolve_parallel_env_count(device_type, requested_envs):
     return 32 if str(device_type) == "cuda" else 16
 
 
+def resolve_parallel_batch_size(device_type):
+    return PARALLEL_CUDA_BATCH_SIZE if str(device_type).strip().lower() == "cuda" else PARALLEL_CPU_BATCH_SIZE
+
+
 def configure_agent_for_mode(agent, trainer_mode):
     trainer_mode = str(trainer_mode).strip().lower()
     if trainer_mode == "parallel":
+        is_cuda = str(agent.device.type).strip().lower() == "cuda"
         agent.configure_training_schedule(
             batch_size=resolve_parallel_batch_size(agent.device.type),
-            warmup_size=4_096,
+            warmup_size=PARALLEL_WARMUP_SIZE,
             target_sync_interval=250,
-            update_every_transitions=32,
-            gradient_steps_per_update=2,
+            update_every_transitions=(
+                PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS
+                if is_cuda
+                else PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS
+            ),
+            gradient_steps_per_update=(
+                PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE
+                if is_cuda
+                else PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE
+            ),
             trainer_mode="parallel",
         )
         return
@@ -1238,6 +1476,71 @@ def resolve_positive_session_int(checkpoint_extra_state, resume, explicit_value,
     return max(1, int(default_value))
 
 
+def configure_agent_for_mode(agent, trainer_mode):
+    trainer_mode = str(trainer_mode).strip().lower()
+    if trainer_mode == "parallel":
+        is_cuda = str(agent.device.type).strip().lower() == "cuda"
+        agent.configure_training_schedule(
+            batch_size=resolve_parallel_batch_size(agent.device.type),
+            warmup_size=PARALLEL_WARMUP_SIZE,
+            target_sync_interval=250,
+            update_every_transitions=(
+                PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS
+                if is_cuda
+                else PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS
+            ),
+            gradient_steps_per_update=(
+                PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE
+                if is_cuda
+                else PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE
+            ),
+            trainer_mode="parallel",
+        )
+        return
+
+    agent.configure_training_schedule(
+        batch_size=256,
+        warmup_size=1000,
+        target_sync_interval=250,
+        update_every_transitions=1,
+        gradient_steps_per_update=1,
+        trainer_mode="single",
+    )
+
+
+def build_training_context(
+    mode_label,
+    episode_reward,
+    train_info,
+    transition,
+    *,
+    trainer_mode="single",
+    parallel_envs=1,
+    parallel_phase="single",
+    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
+    fast_mode_requested=False,
+    fast_mode_effective=False,
+    fast_tail_episodes=5,
+    episodes_remaining=0,
+    **extra_context,
+):
+    return {
+        "mode_label": mode_label,
+        "episode_reward": episode_reward,
+        "train_info": train_info,
+        "transition": transition,
+        "trainer_mode": str(trainer_mode or DEFAULT_TRAINER_MODE),
+        "parallel_envs": int(max(1, parallel_envs)),
+        "parallel_phase": str(parallel_phase or "single"),
+        "eval_tail_episodes": int(max(1, eval_tail_episodes)),
+        "fast_mode_requested": bool(fast_mode_requested),
+        "fast_mode_effective": bool(fast_mode_effective),
+        "fast_tail_episodes": int(fast_tail_episodes),
+        "episodes_remaining": int(max(0, episodes_remaining)),
+        **extra_context,
+    }
+
+
 def await_training_start(
     *,
     game,
@@ -1249,6 +1552,7 @@ def await_training_start(
     session_perf,
     parallel_envs,
     eval_tail_episodes,
+    eval_interval_episodes,
     fast_tail_episodes,
 ):
     if not game.render or dashboard.started:
@@ -1296,6 +1600,10 @@ def await_training_start(
             fast_mode_effective=preview_fast_mode,
             fast_tail_episodes=fast_tail_episodes,
             episodes_remaining=dashboard.get_episode_goal(),
+            eval_interval_episodes=eval_interval_episodes,
+            eval_interval_remaining=eval_interval_episodes,
+            best_eval_avg=float(getattr(agent, "best_eval_avg", float("-inf"))),
+            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
         )
         overlay_subtitle = (
             f"Parallel mode is the speed path: it will batch {dashboard.get_parallel_env_count()} environments and render only the evaluation tail."
@@ -1352,11 +1660,13 @@ def train_parallel_mode(
     session_perf,
     parallel_envs,
     eval_tail_episodes,
+    eval_interval_episodes=PARALLEL_EVAL_INTERVAL_EPISODES,
 ):
     dashboard.set_baseline_visibility(False)
     pending_metric_entries = []
     parallel_envs = max(1, int(parallel_envs))
     eval_tail_episodes = max(1, int(eval_tail_episodes))
+    eval_interval_episodes = max(1, int(eval_interval_episodes))
     envs = [SnakeLogicEnv(speed=0) for _ in range(parallel_envs)]
     reward_config = dict(dashboard.reward_config)
     for env in envs:
@@ -1373,6 +1683,8 @@ def train_parallel_mode(
     bulk_iteration = 0
     completed_since_print = 0
     finish_requested = False
+    next_eval_checkpoint = eval_interval_episodes
+    periodic_eval_rounds_completed = 0
 
     def completed_in_session():
         return max(0, agent.n_games - session_start_games)
@@ -1400,6 +1712,12 @@ def train_parallel_mode(
         episode_reward,
         episode_steps_value,
         transition_override=None,
+        eval_scope=None,
+        eval_cycle=None,
+        eval_round_index=None,
+        eval_round_average=None,
+        periodic_eval_remaining=None,
+        best_eval_avg=None,
     ):
         train_info = build_live_train_info(
             agent.last_train_info,
@@ -1420,6 +1738,25 @@ def train_parallel_mode(
             fast_mode_effective=False,
             fast_tail_episodes=1,
             episodes_remaining=max(0, total_goal - completed_in_session()),
+            eval_interval_episodes=eval_interval_episodes,
+            eval_interval_remaining=max(0, next_eval_checkpoint - completed_in_session()),
+            completed_training_episodes=completed_in_session(),
+            best_eval_avg=float(
+                best_eval_avg
+                if best_eval_avg is not None
+                else getattr(agent, "best_eval_avg", float("-inf"))
+            ),
+            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
+            periodic_eval_rounds_completed=int(periodic_eval_rounds_completed),
+            periodic_eval_remaining=(
+                None if periodic_eval_remaining is None else int(max(0, periodic_eval_remaining))
+            ),
+            eval_scope=eval_scope,
+            eval_cycle=None if eval_cycle is None else int(eval_cycle),
+            eval_round_index=None if eval_round_index is None else int(eval_round_index),
+            eval_round_average=(
+                None if eval_round_average is None else float(eval_round_average)
+            ),
         )
 
     def save_parallel_checkpoint():
@@ -1432,13 +1769,105 @@ def train_parallel_mode(
             trainer_mode="parallel",
             parallel_envs=parallel_envs,
             eval_tail_episodes=eval_tail_episodes,
+            eval_interval_episodes=eval_interval_episodes,
         )
+
+    def run_periodic_eval_round(cycle_index):
+        nonlocal last_transition, periodic_eval_rounds_completed
+        eval_env = SnakeLogicEnv(speed=0)
+        eval_env.set_reward_config(dict(dashboard.reward_config))
+        eval_scores = []
+        eval_episode_rewards = []
+        eval_episode_steps = []
+        last_eval_score = 0
+        last_eval_reward = 0.0
+        last_eval_steps = 0
+
+        try:
+            for eval_run_index in range(eval_tail_episodes):
+                if game.quit_requested or finish_requested:
+                    break
+
+                eval_env.reset()
+                state = agent.encode_state(eval_env)
+                episode_reward = 0.0
+                step_count = 0
+
+                while not game.quit_requested and not finish_requested:
+                    action_info = agent.get_action_details(state, greedy=True)
+                    reward, game_over, score = eval_env.play_step(
+                        action_info["action"],
+                        events=[],
+                        draw_frame=False,
+                        apply_pacing=False,
+                    )
+                    episode_reward += reward
+                    step_count += 1
+                    state = agent.encode_state(eval_env)
+                    last_transition = {
+                        "reward_text": f"{reward:+.2f}",
+                        "done": game_over,
+                        "score": int(score),
+                    }
+                    if game_over:
+                        last_eval_score = int(score)
+                        last_eval_reward = float(episode_reward)
+                        last_eval_steps = int(step_count)
+                        break
+
+                if game.quit_requested or finish_requested:
+                    break
+
+                eval_scores.append(last_eval_score)
+                eval_episode_rewards.append(last_eval_reward)
+                eval_episode_steps.append(last_eval_steps)
+
+            if eval_scores:
+                eval_average = float(sum(eval_scores) / len(eval_scores))
+            else:
+                eval_average = float("-inf")
+            periodic_eval_rounds_completed += 1
+            update_best_eval_tracking(
+                agent,
+                eval_average,
+                {
+                    "mode": "periodic",
+                    "cycle_index": int(cycle_index),
+                    "scores": list(eval_scores),
+                    "episode_rewards": list(eval_episode_rewards),
+                    "episode_steps": list(eval_episode_steps),
+                    "average_score": float(eval_average),
+                    "completed_training_episodes": int(completed_in_session()),
+                    "eval_tail_episodes": int(eval_tail_episodes),
+                },
+            )
+            return {
+                "scores": list(eval_scores),
+                "episode_rewards": list(eval_episode_rewards),
+                "episode_steps": list(eval_episode_steps),
+                "average_score": float(eval_average),
+            }
+        finally:
+            eval_env.close()
+
+    def run_due_periodic_evals():
+        nonlocal next_eval_checkpoint
+        while completed_in_session() >= next_eval_checkpoint:
+            eval_summary = run_periodic_eval_round(
+                periodic_eval_rounds_completed + 1,
+            )
+            if not eval_summary.get("scores"):
+                return False
+            next_eval_checkpoint += eval_interval_episodes
+        return True
 
     while not game.quit_requested:
         current_goal = dashboard.get_episode_goal()
         eval_count = min(eval_tail_episodes, current_goal) if should_run_eval_tail() else 0
         bulk_target = max(0, current_goal - eval_count)
         if completed_in_session() >= bulk_target:
+            if not run_due_periodic_evals():
+                break
             break
 
         bulk_iteration += 1
@@ -1514,6 +1943,25 @@ def train_parallel_mode(
 
         action_indices = agent.get_action_indices_batch(env_states, greedy=False)
         completed_records = []
+        next_eval_checkpoint = max(next_eval_checkpoint, max(1, int(eval_interval_episodes)))
+        periodic_eval_rounds_completed = int(periodic_eval_rounds_completed)
+
+        def run_due_periodic_evals():
+            nonlocal next_eval_checkpoint, periodic_eval_rounds_completed
+            while completed_in_session() >= next_eval_checkpoint:
+                eval_summary = run_parallel_greedy_evaluation(
+                    agent,
+                    dashboard,
+                    num_episodes=eval_tail_episodes,
+                    cycle_index=periodic_eval_rounds_completed + 1,
+                    completed_training_episodes=completed_in_session(),
+                )
+                periodic_eval_rounds_completed += 1
+                if not eval_summary.get("scores"):
+                    return False
+                next_eval_checkpoint += max(1, int(eval_interval_episodes))
+            return True
+
         responsive_chunk = max(4, min(16, parallel_envs // 4 if parallel_envs > 8 else parallel_envs))
         env_step_started = time.perf_counter()
         encode_elapsed = 0.0
@@ -1628,10 +2076,6 @@ def train_parallel_mode(
                 save_parallel_checkpoint()
 
             completed_since_print += 1
-
-            current_goal = dashboard.get_episode_goal()
-            eval_count = min(eval_tail_episodes, current_goal) if should_run_eval_tail() else 0
-            bulk_target = max(0, current_goal - eval_count)
             if completed_in_session() < bulk_target:
                 env = envs[record["env_index"]]
                 env.reset()
@@ -1641,6 +2085,9 @@ def train_parallel_mode(
                 record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
                 episode_rewards[record["env_index"]] = 0.0
                 episode_steps[record["env_index"]] = 0
+
+        if not run_due_periodic_evals():
+            break
 
         if completed_since_print >= 4 or (
             completed_records and completed_in_session() >= bulk_target
@@ -1710,8 +2157,12 @@ def train_parallel_mode(
     if finish_requested:
         return best_score, last_transition, True, "parallel"
 
+    restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
+    restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
+    agent.best_eval_restored = True
     remaining_goal = max(0, dashboard.get_episode_goal() - completed_in_session())
     eval_runs = min(eval_tail_episodes, remaining_goal) if should_run_eval_tail() else 0
+    final_eval_scores = []
     for _ in range(eval_runs):
         if game.quit_requested:
             break
@@ -1910,6 +2361,7 @@ def train_parallel_mode(
             loss=agent.last_train_info.get("loss"),
         )
         best_score = max(best_score, score)
+        final_eval_scores.append(int(score))
         if capture_replay and episode_replay_frames:
             recent_episode_replays.append(
                 {
@@ -1959,6 +2411,20 @@ def train_parallel_mode(
             flush_metric_buffer(metrics_log_path, pending_metric_entries)
             return best_score, last_transition, False, switched_mode
 
+    if final_eval_scores:
+        final_eval_average = float(sum(final_eval_scores) / len(final_eval_scores))
+        update_best_eval_tracking(
+            agent,
+            final_eval_average,
+            {
+                "mode": "final_tail",
+                "scores": list(final_eval_scores),
+                "average_score": float(final_eval_average),
+                "completed_training_episodes": int(completed_in_session()),
+                "eval_tail_episodes": int(eval_tail_episodes),
+            },
+        )
+
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
     if finish_requested and not game.quit_requested:
         return best_score, last_transition, True, "parallel"
@@ -1992,7 +2458,9 @@ def train_session(
     checkpoint_state = {}
     if resume and os.path.exists(checkpoint_path):
         checkpoint_state = agent.load(checkpoint_path)
+        initialize_best_eval_tracking(agent, checkpoint_state)
         print(f"Loaded checkpoint from {checkpoint_path}")
+    initialize_best_eval_tracking(agent, checkpoint_state)
 
     resolved_trainer_mode = resolve_trainer_mode_for_session(
         checkpoint_state,
@@ -2012,7 +2480,14 @@ def train_session(
         resume,
         eval_tail_episodes,
         "eval_tail_episodes",
-        3,
+        DEFAULT_EVAL_TAIL_EPISODES,
+    )
+    resolved_eval_interval_episodes = resolve_positive_session_int(
+        checkpoint_state,
+        resume,
+        None,
+        "eval_interval_episodes",
+        PARALLEL_EVAL_INTERVAL_EPISODES,
     )
     resolved_stall_threshold = resolve_positive_session_int(
         checkpoint_state,
@@ -2069,6 +2544,7 @@ def train_session(
             session_perf=session_perf,
             parallel_envs=resolved_parallel_envs,
             eval_tail_episodes=resolved_eval_tail_episodes,
+            eval_interval_episodes=resolved_eval_interval_episodes,
             fast_tail_episodes=fast_tail_episodes,
         )
         if game.quit_requested:
@@ -2100,6 +2576,7 @@ def train_session(
                     session_perf=session_perf,
                     parallel_envs=resolved_parallel_envs,
                     eval_tail_episodes=resolved_eval_tail_episodes,
+                    eval_interval_episodes=resolved_eval_interval_episodes,
                 )
                 if game.quit_requested:
                     training_completed = False
@@ -2492,6 +2969,9 @@ def train_session(
             training_completed = True
     finally:
         flush_metric_buffer(metrics_log_path, pending_metric_entries)
+        restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
+        agent.best_eval_restored = True
+        restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
         save_checkpoint(
             agent,
             checkpoint_path,
@@ -2501,6 +2981,7 @@ def train_session(
             trainer_mode=active_trainer_mode,
             parallel_envs=resolved_parallel_envs,
             eval_tail_episodes=resolved_eval_tail_episodes,
+            eval_interval_episodes=resolved_eval_interval_episodes,
         )
         if training_completed and not game.quit_requested:
             show_post_run_results(
@@ -2590,6 +3071,15 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
                     episode_reward,
                     agent.last_train_info,
                     last_transition,
+                    best_eval_avg=float(
+                        checkpoint_state.get("best_eval", {}).get("best_eval_avg", float("-inf"))
+                    ),
+                    best_eval_round=copy.deepcopy(
+                        checkpoint_state.get("best_eval", {}).get("best_eval_round", {})
+                    ),
+                    best_eval_restored=bool(
+                        checkpoint_state.get("best_eval", {}).get("best_eval_snapshot")
+                    ),
                 )
 
                 game.set_dashboard_data(

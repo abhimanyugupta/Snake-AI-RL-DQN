@@ -917,6 +917,7 @@ class TrainingDashboard:
             f"cap {replay_status.get('capacity', 0)} | "
             f"beta {replay_status.get('beta', 0.0):.2f}"
         )
+        training_status_lines = self._build_training_status_lines(agent, train_info)
 
         if lightweight:
             network_view = {
@@ -1013,6 +1014,7 @@ class TrainingDashboard:
 
         best_q = max(q_values)
         best_action_index = q_values.index(best_q)
+        training_status_lines = self._build_training_status_lines(agent, train_info)
         if parallel_bulk_mode:
             decision_summary = [
                 f"Completed runs: {completed_progress}/{max(1, int(episode_goal))}",
@@ -1023,6 +1025,7 @@ class TrainingDashboard:
                 f"Env steps/sec: {self._format_rate(train_info.get('env_steps_per_sec'))}",
                 f"Updates/sec: {self._format_rate(train_info.get('updates_per_sec'))}",
                 f"Replay: {replay_summary}",
+                *training_status_lines,
                 f"Architecture: {agent.architecture_label}",
             ]
         else:
@@ -1032,6 +1035,7 @@ class TrainingDashboard:
                 f"Greedy favorite: {agent.ACTION_LABELS[best_action_index]} ({best_q:+.3f})",
                 f"Food cue: {agent.explain_food_view(state)}",
                 f"Replay: {replay_summary}",
+                *training_status_lines,
                 f"Architecture: {agent.architecture_label}",
             ]
         if lightweight:
@@ -1212,6 +1216,10 @@ class TrainingDashboard:
             ),
             f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
             f"Replay: {replay_summary}",
+            *training_status_lines,
+            *training_status_lines,
+            *training_status_lines,
+            *training_status_lines,
             f"n-step returns: {replay_status.get('n_step', 1)}",
             f"Architecture: {agent.architecture_label}",
             f"State features: {len(agent.STATE_LABELS)}",
@@ -1539,6 +1547,63 @@ class TrainingDashboard:
             )
         )
         return buttons
+
+    def _build_training_status_lines(self, agent, train_info):
+        evaluation_status = agent.evaluation_status()
+        current_lr = self._format_learning_rate(train_info.get("current_lr", agent.current_lr))
+        latest_eval_avg = self._format_metric(evaluation_status.get("latest_eval_avg"))
+        best_eval_avg = self._format_metric(evaluation_status.get("best_eval_avg"))
+        target_update_mode = str(
+            train_info.get("target_update_mode", agent.target_update_mode)
+        ).strip().lower() or "soft"
+        update_every_transitions = int(
+            train_info.get("update_every_transitions", agent.update_every_transitions)
+        )
+        gradient_steps_per_update = int(
+            train_info.get("gradient_steps_per_update", agent.gradient_steps_per_update)
+        )
+        update_label = "update" if gradient_steps_per_update == 1 else "updates"
+        return [
+            (
+                f"Training status: LR {current_lr} | latest eval avg {latest_eval_avg} | "
+                f"best eval avg {best_eval_avg}"
+            ),
+            (
+                f"Target update: {target_update_mode} | replay ratio: "
+                f"{update_every_transitions}T -> {gradient_steps_per_update} {update_label}"
+            ),
+        ]
+
+    def _build_training_status_lines(self, agent, train_info):
+        evaluation_status = agent.evaluation_status()
+        current_lr = self._format_learning_rate(train_info.get("current_lr", agent.current_lr))
+        latest_eval_avg = self._format_metric(evaluation_status.get("latest_eval_avg"))
+        best_eval_avg = self._format_metric(evaluation_status.get("best_eval_avg"))
+        target_update_mode = str(
+            train_info.get("target_update_mode", agent.target_update_mode)
+        ).strip().lower() or "soft"
+        update_every_transitions = int(
+            train_info.get("update_every_transitions", agent.update_every_transitions)
+        )
+        gradient_steps_per_update = int(
+            train_info.get("gradient_steps_per_update", agent.gradient_steps_per_update)
+        )
+        update_label = "update" if gradient_steps_per_update == 1 else "updates"
+        return [
+            (
+                f"Training status: LR {current_lr} | latest eval avg {latest_eval_avg} | "
+                f"best eval avg {best_eval_avg}"
+            ),
+            (
+                f"Target update: {target_update_mode} | replay ratio: "
+                f"{update_every_transitions}T -> {gradient_steps_per_update} {update_label}"
+            ),
+        ]
+
+    def _format_learning_rate(self, value):
+        if value is None:
+            return "warming up"
+        return f"{float(value):.2e}"
 
     def _format_metric(self, value):
         if value is None:

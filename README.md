@@ -9,8 +9,8 @@ It also supports a separate **parallel training mode** for higher-throughput bul
 - the richer 30-feature state vector seen by the DQN
 - live action selection and Q-values
 - hybrid replay-memory driven training
-- Double-DQN target updates with 3-step returns
-- target-network syncing
+- Double-DQN with soft target updates, 3-step returns, and periodic greedy evaluation
+- best-eval tracking plus best-model restore before the rendered tail/results
 - a local tabular baseline for comparison
 - a live neural-network view across configurable hidden layers
 - a separate parallel trainer that batches multiple Snake environments for speed
@@ -86,6 +86,11 @@ Notes:
 - replayed transitions now use a fixed 3-step return target before they enter memory
 - replay capacity now defaults to `200000`
 - parallel mode now uses a larger warmup (`4096`) and a batch size of `512` to improve sample efficiency without delaying GPU updates as long
+- CUDA parallel mode now follows a `64T -> 8 updates` cadence, while CPU parallel mode keeps a lighter `32T -> 2 updates` cadence
+- target updates are soft / Polyak instead of interval-only hard copies
+- periodic greedy eval now tracks both the latest and best evaluation averages
+- when periodic eval stalls, the learning rate decays toward `1e-5`
+- the best-eval snapshot is restored before the rendered evaluation tail and post-run results
 - the DQN now uses automatic plateau recovery: when training stalls for long enough, epsilon reheats upward temporarily before decaying again
 - the default stall threshold is now `150`, and the GUI exposes it as an editable lower-dock input
 - repeated spin-loop behavior now gets a small automatic penalty so the snake is nudged away from cycling in place
@@ -96,7 +101,7 @@ Notes:
 - when a fast-mode session finishes, the UI can replay the last 3 recorded runs from both the board overlay and a `Recent Replays` card in `Overview`
 - the `Recent Replays` card explains when replay is unavailable and what will be captured next
 - fast-mode single training runs uncapped and hidden, then hands off to the post-run results and replay screen
-- parallel mode keeps bulk training speed-first, updates the graph on completed episodes, and renders only the final evaluation tail runs
+- parallel mode keeps bulk training speed-first, updates the graph on completed episodes, restores the best-eval model before the evaluation tail, and renders only the final evaluation tail runs
 - during parallel bulk mode, the left board switches to an aggregate status panel so it does not pretend to show one specific run
 - in parallel mode, only the newest 3 evaluation-tail replays are kept in memory
 - the parallel trainer now reuses preallocated state buffers instead of rebuilding NumPy state batches every step
@@ -148,6 +153,7 @@ After a fast-mode session completes, the finish overlay and `Overview` sidebar c
 The lower dock now includes a `Stall threshold` input that controls when epsilon reheats during plateau recovery; fresh sessions default it to `150`.
 The overview also shows lightweight throughput feedback during training, including episode steps, environment steps per second, and optimizer updates per second.
 In parallel mode, bulk training uses multiple Snake environments and the `Network` / `Algorithm` pages switch to placeholders until the final rendered evaluation tail begins.
+The overview and results summary text now also shows current learning rate, latest eval average, best eval average, soft target-update mode, and replay cadence in `64T -> 8 updates` style.
 The score-series toggles now live in the lower dock near the loss chart, which keeps them visible on shorter windows.
 Post-run tab switching now rebuilds fresh finished-state views instead of relying on one stale snapshot, so `Overview`, `Network`, `Algorithm`, and `Results` can all be opened safely after training ends.
 The post-run `Results` tab now includes an episode slider so you can scrub across the run and inspect score and loss values at different points in training.
@@ -156,3 +162,10 @@ The post-run `Results` tab now includes an episode slider so you can scrub acros
 
 The configurable-architecture Deep RL version is in place, with CPU/CUDA device selection and an optional fast training mode.
 Open `SESSION_HANDOFF.md` for a clear done / next / blocked record before continuing in another Codex session.
+## Latest Training Stack Notes
+
+- Parallel CUDA training now uses a denser replay/update schedule: batch size `1024`, warmup `4096`, `64` collected transitions between update windows, and `8` gradient steps per update. CPU parallel keeps the lighter `512 / 4096 / 32 / 2` schedule.
+- Active target updates now use soft Polyak updates (`tau = 0.005`) instead of relying on hard periodic target copies.
+- Parallel training now runs periodic greedy evaluation every `200` completed training episodes for `5` no-replay/no-train evaluation episodes.
+- The best greedy-evaluated model is snapshotted in memory and restored before the final checkpoint save and post-run results flow, so late-run regression does not overwrite the best discovered policy.
+- Fresh runs still start at learning rate `3e-4`, and greedy-evaluation stalls can decay it to `1e-4` and then `5e-5`.

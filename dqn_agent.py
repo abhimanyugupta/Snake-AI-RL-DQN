@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+
+import copy
 import random
 from collections import deque
 from typing import Iterable, List, Sequence
@@ -27,6 +30,15 @@ DEFAULT_HIDDEN_LAYERS = [256, 256, 128]
 LEGACY_HIDDEN_LAYERS = list(DEFAULT_HIDDEN_LAYERS)
 SUPPORTED_DEVICE_CHOICES = ("auto", "cpu", "cuda")
 DEFAULT_LEARNING_RATE = 3e-4
+DEFAULT_TARGET_UPDATE_TAU = 0.005
+DEFAULT_EVAL_STALE_WINDOWS = 0
+DEFAULT_LR_DECAY_FACTOR = 0.5
+DEFAULT_LR_DECAY_MIN_LR = 5e-5
+DEFAULT_LR_DECAY_PATIENCE_WINDOWS = 3
+
+
+def _safe_optional_dict(value) -> dict | None:
+    return value if isinstance(value, dict) else None
 DEFAULT_STALL_THRESHOLD = 150
 DEFAULT_REPLAY_CAPACITY = 200_000
 DEFAULT_PRIORITY_ALPHA = 0.4
@@ -36,6 +48,11 @@ DEFAULT_PRIORITY_BETA_INCREMENT = 5e-5
 DEFAULT_PRIORITY_EPSILON = 1e-5
 DEFAULT_HYBRID_PRIORITIZED_FRACTION = 0.3
 DEFAULT_N_STEP_RETURNS = 3
+DEFAULT_TARGET_UPDATE_TAU = 0.005
+DEFAULT_EVAL_STALE_WINDOWS = 0
+DEFAULT_LR_DECAY_FACTOR = 0.5
+DEFAULT_LR_DECAY_MIN_LR = 1e-5
+DEFAULT_LR_DECAY_PATIENCE_WINDOWS = 3
 LEGACY_STATE_SIZE = 18
 LEGACY_STATE_SCHEMA_VERSION = 1
 CURRENT_STATE_SCHEMA_VERSION = 2
@@ -131,6 +148,10 @@ def load_checkpoint_network_config(path: str) -> dict:
     network_config["state_schema_version"] = int(state_schema_version)
     network_config.setdefault("output_size", len(DQNAgent.ACTION_LABELS))
     return network_config
+
+
+def _safe_optional_dict(value) -> dict | None:
+    return value if isinstance(value, dict) else None
 
 
 class ReplayBuffer:
@@ -558,13 +579,38 @@ class DQNAgent:
         gradient_steps_per_update: int = 1,
         hidden_layers: Iterable[int] | None = None,
         device_preference: str = "auto",
+        *,
+        target_update_tau: float = DEFAULT_TARGET_UPDATE_TAU,
+        lr_decay_factor: float = DEFAULT_LR_DECAY_FACTOR,
+        lr_decay_min_lr: float = DEFAULT_LR_DECAY_MIN_LR,
+        lr_decay_patience_windows: int = DEFAULT_LR_DECAY_PATIENCE_WINDOWS,
+        eval_stale_windows: int = DEFAULT_EVAL_STALE_WINDOWS,
     ):
         self.device_preference = normalize_device_preference(device_preference)
         self.device = resolve_torch_device(self.device_preference)
         self.algorithm_label = "Double DQN + 3-Step Returns + Hybrid Replay"
+        self.target_update_mode = "soft"
+        self.target_update_tau = float(max(0.0, min(1.0, target_update_tau)))
+        self.target_update_count = 0
+
+        self.latest_eval_avg = float("-inf")
+        self.latest_eval_episode = -1
+        self.best_eval_avg = float("-inf")
+        self.best_eval_episode = -1
+        self.eval_stale_windows = max(0, int(eval_stale_windows))
+
+        self.lr_decay_factor = float(lr_decay_factor)
+        self.lr_decay_min_lr = max(0.0, float(lr_decay_min_lr))
+        self.lr_decay_patience_windows = max(1, int(lr_decay_patience_windows))
+        self.lr_decay_count = 0
+
+        self._best_model_snapshot: dict | None = None
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.n_step = DEFAULT_N_STEP_RETURNS
+        self.target_update_mode = "soft"
+        self.target_update_tau = float(max(0.0, min(1.0, target_update_tau)))
+        self.target_update_count = 0
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
@@ -577,6 +623,16 @@ class DQNAgent:
         self.reheat_count = 0
         self.plateau_counter = 0
         self.cooldown_remaining = 0
+        self.latest_eval_avg = float("-inf")
+        self.latest_eval_episode = -1
+        self.best_eval_avg = float("-inf")
+        self.best_eval_episode = -1
+        self.eval_stale_windows = max(0, int(eval_stale_windows))
+        self.lr_decay_factor = float(lr_decay_factor)
+        self.lr_decay_min_lr = max(0.0, float(lr_decay_min_lr))
+        self.lr_decay_patience_windows = max(1, int(lr_decay_patience_windows))
+        self.lr_decay_count = 0
+        self._best_model_snapshot: dict | None = None
         self.best_episode_score = float("-inf")
         self.best_moving_avg = float("-inf")
         self.exploration_mode = "decay"
@@ -600,7 +656,10 @@ class DQNAgent:
             "buffer_size": 0,
             "warmup_remaining": warmup_size,
             "synced_target": False,
-            "target_sync_remaining": target_sync_interval,
+            "target_sync_remaining": 0,
+            "target_update_mode": self.target_update_mode,
+            "target_update_tau": float(self.target_update_tau),
+            "target_update_count": int(self.target_update_count),
             "grad_norm": None,
             "did_update": False,
             "update_count": 0,
@@ -610,6 +669,7 @@ class DQNAgent:
             "replay_capacity": int(replay_capacity),
             "replay_beta": float(DEFAULT_PRIORITY_BETA_START),
             "n_step": int(self.n_step),
+            "current_lr": float(self.learning_rate),
         }
 
         self.policy_net = DQNNetwork(
@@ -622,14 +682,18 @@ class DQNAgent:
             hidden_layers=self.hidden_layers,
             output_size=len(self.ACTION_LABELS),
         ).to(self.device)
-        self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.loss_fn = nn.SmoothL1Loss(reduction="none")
         self.replay_buffer = ReplayBuffer(replay_capacity, len(self.STATE_LABELS))
+        self.learning_rate = float(self.current_lr)
         self.last_train_info["replay_capacity"] = int(self.replay_buffer.capacity)
         self.last_train_info["replay_beta"] = float(self.replay_buffer.priority_beta)
+        self.last_train_info["current_lr"] = float(self.current_lr)
+        self.last_train_info["target_update_mode"] = self.target_update_mode
+        self.last_train_info["target_update_tau"] = float(self.target_update_tau)
+        self.last_train_info["target_update_count"] = int(self.target_update_count)
         self._encoder_cell_capacity = 0
         self._encoder_visit_stamps = None
         self._encoder_queue = None
@@ -647,8 +711,212 @@ class DQNAgent:
         ]
         return " -> ".join(str(size) for size in layer_sizes)
 
+    @property
+    def current_lr(self) -> float:
+        if self.optimizer.param_groups:
+            return float(self.optimizer.param_groups[0].get("lr", self.learning_rate))
+        return float(self.learning_rate)
+
+    def _set_learning_rate(self, learning_rate: float) -> None:
+        new_lr = float(max(0.0, learning_rate))
+        for group in self.optimizer.param_groups:
+            group["lr"] = new_lr
+        self.learning_rate = new_lr
+
+    def _decay_learning_rate(self) -> bool:
+        if self.current_lr <= self.lr_decay_min_lr + 1e-12:
+            return False
+        new_lr = max(self.lr_decay_min_lr, self.current_lr * self.lr_decay_factor)
+        if new_lr >= self.current_lr - 1e-12:
+            return False
+        self._set_learning_rate(new_lr)
+        self.lr_decay_count += 1
+        return True
+
+    def _target_sync_remaining(self) -> int:
+        if self.target_update_mode == "soft":
+            return 0
+        if self.target_sync_interval <= 0:
+            return 0
+        return max(0, self.target_sync_interval - (self.train_steps % self.target_sync_interval))
+
+    def sync_target_network(self) -> None:
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+
+    def _soft_update_target_network(self) -> None:
+        tau = float(self.target_update_tau)
+        if tau <= 0.0:
+            return
+        with torch.no_grad():
+            for target_param, policy_param in zip(
+                self.target_net.parameters(), self.policy_net.parameters()
+            ):
+                target_param.data.mul_(1.0 - tau).add_(policy_param.data, alpha=tau)
+
+    def target_update_status(self) -> dict:
+        return {
+            "target_update_mode": self.target_update_mode,
+            "target_update_tau": float(self.target_update_tau),
+            "target_update_count": int(self.target_update_count),
+            "target_sync_interval": int(self.target_sync_interval),
+            "target_sync_remaining": int(self._target_sync_remaining()),
+            "synced_target": False,
+            "current_lr": float(self.current_lr),
+        }
+
+    def evaluation_status(self) -> dict:
+        return {
+            "latest_eval_avg": (
+                None if not np.isfinite(self.latest_eval_avg) else float(self.latest_eval_avg)
+            ),
+            "latest_eval_episode": (
+                None if int(self.latest_eval_episode) < 0 else int(self.latest_eval_episode)
+            ),
+            "best_eval_avg": (
+                None if not np.isfinite(self.best_eval_avg) else float(self.best_eval_avg)
+            ),
+            "best_eval_episode": (
+                None if int(self.best_eval_episode) < 0 else int(self.best_eval_episode)
+            ),
+            "eval_stale_windows": int(self.eval_stale_windows),
+            "lr_decay_count": int(self.lr_decay_count),
+            "lr_decay_factor": float(self.lr_decay_factor),
+            "lr_decay_min_lr": float(self.lr_decay_min_lr),
+            "lr_decay_patience_windows": int(self.lr_decay_patience_windows),
+            "current_lr": float(self.current_lr),
+            "target_update_mode": self.target_update_mode,
+            "target_update_tau": float(self.target_update_tau),
+            "target_update_count": int(self.target_update_count),
+            "has_best_model_snapshot": bool(self._best_model_snapshot is not None),
+        }
+
+    def _build_best_model_snapshot(self) -> dict:
+        return {
+            "policy_state_dict": copy.deepcopy(self.policy_net.state_dict()),
+            "target_state_dict": copy.deepcopy(self.target_net.state_dict()),
+            "metadata": {
+                "train_steps": int(self.train_steps),
+                "n_games": int(self.n_games),
+                "current_lr": float(self.current_lr),
+                "target_update_mode": self.target_update_mode,
+                "target_update_tau": float(self.target_update_tau),
+                "target_update_count": int(self.target_update_count),
+                "latest_eval_avg": (
+                    None if not np.isfinite(self.latest_eval_avg) else float(self.latest_eval_avg)
+                ),
+                "best_eval_avg": (
+                    None if not np.isfinite(self.best_eval_avg) else float(self.best_eval_avg)
+                ),
+                "best_eval_episode": (
+                    None if int(self.best_eval_episode) < 0 else int(self.best_eval_episode)
+                ),
+            },
+        }
+
+    def snapshot_best_model(self) -> dict | None:
+        snapshot = self._build_best_model_snapshot()
+        self._best_model_snapshot = snapshot
+        return copy.deepcopy(snapshot)
+
+    def restore_best_model(self, snapshot: dict | None = None) -> bool:
+        candidate = _safe_optional_dict(snapshot) if snapshot is not None else self._best_model_snapshot
+        if not isinstance(candidate, dict):
+            return False
+        policy_state_dict = candidate.get("policy_state_dict")
+        if policy_state_dict is None:
+            return False
+        self.policy_net.load_state_dict(policy_state_dict)
+        target_state_dict = candidate.get("target_state_dict")
+        if target_state_dict is not None:
+            self.target_net.load_state_dict(target_state_dict)
+        else:
+            self.sync_target_network()
+        self.target_net.eval()
+        return True
+
     def get_action(self, state: np.ndarray) -> List[int]:
         return self.get_action_selection(state)["action"]
+
+    @property
+    def current_lr(self) -> float:
+        return float(self.optimizer.param_groups[0]["lr"])
+
+    def _set_learning_rate(self, learning_rate: float) -> None:
+        learning_rate = max(self.lr_decay_min_lr, float(learning_rate))
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
+        self.learning_rate = learning_rate
+
+    def _decay_learning_rate(self) -> bool:
+        if self.current_lr <= self.lr_decay_min_lr + 1e-12:
+            return False
+        new_lr = max(self.lr_decay_min_lr, self.current_lr * self.lr_decay_factor)
+        if abs(new_lr - self.current_lr) <= 1e-12:
+            return False
+        self._set_learning_rate(new_lr)
+        self.lr_decay_count += 1
+        return True
+
+    def _target_sync_remaining(self) -> int:
+        if self.target_update_mode == "soft" or self.target_sync_interval <= 0:
+            return 0
+        return int(self.target_sync_interval - (self.train_steps % self.target_sync_interval))
+
+    def sync_target_network(self) -> None:
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def _soft_update_target_network(self) -> None:
+        tau = float(self.target_update_tau)
+        if tau <= 0.0:
+            return
+        with torch.no_grad():
+            for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+                target_param.data.mul_(1.0 - tau).add_(policy_param.data, alpha=tau)
+
+    def target_update_status(self) -> dict:
+        return {
+            "target_update_mode": self.target_update_mode,
+            "target_update_tau": float(self.target_update_tau),
+            "target_update_count": int(self.target_update_count),
+            "target_sync_remaining": int(self._target_sync_remaining()),
+        }
+
+    def evaluation_status(self) -> dict:
+        return {
+            "latest_eval_avg": float(self.latest_eval_avg),
+            "latest_eval_episode": int(self.latest_eval_episode),
+            "best_eval_avg": float(self.best_eval_avg),
+            "best_eval_episode": int(self.best_eval_episode),
+            "eval_stale_windows": int(self.eval_stale_windows),
+            "lr_decay_count": int(self.lr_decay_count),
+            "current_lr": float(self.current_lr),
+        }
+
+    def _build_best_model_snapshot(self) -> dict:
+        return {
+            "policy_state_dict": copy.deepcopy(self.policy_net.state_dict()),
+            "target_state_dict": copy.deepcopy(self.target_net.state_dict()),
+        }
+
+    def snapshot_best_model(self) -> dict | None:
+        self._best_model_snapshot = self._build_best_model_snapshot()
+        return copy.deepcopy(self._best_model_snapshot)
+
+    def restore_best_model(self, snapshot: dict | None = None) -> bool:
+        chosen_snapshot = snapshot or self._best_model_snapshot
+        if not isinstance(chosen_snapshot, dict):
+            return False
+        policy_state_dict = _safe_optional_dict(chosen_snapshot.get("policy_state_dict"))
+        target_state_dict = _safe_optional_dict(chosen_snapshot.get("target_state_dict"))
+        if policy_state_dict is None:
+            return False
+        self.policy_net.load_state_dict(policy_state_dict)
+        if target_state_dict is not None:
+            self.target_net.load_state_dict(target_state_dict)
+        else:
+            self.sync_target_network()
+        return True
 
     def configure_training_schedule(
         self,
@@ -674,9 +942,14 @@ class DQNAgent:
             self.last_train_info["trainer_mode"] = str(trainer_mode)
         self.last_train_info["batch_size"] = int(self.batch_size)
         self.last_train_info["n_step"] = int(self.n_step)
+        self.last_train_info["current_lr"] = float(self.current_lr)
+        self.last_train_info["target_update_mode"] = self.target_update_mode
+        self.last_train_info["target_update_tau"] = float(self.target_update_tau)
+        self.last_train_info["target_update_count"] = int(self.target_update_count)
+        self.last_train_info["target_sync_remaining"] = int(self._target_sync_remaining())
 
     def replay_status(self) -> dict:
-        return {
+        status = {
             "mode": "Hybrid",
             "capacity": int(self.replay_buffer.capacity),
             "beta": float(self.replay_buffer.priority_beta),
@@ -684,6 +957,8 @@ class DQNAgent:
             "mix": f"{int(round((1.0 - self.replay_buffer.prioritized_fraction) * 100))}U/{int(round(self.replay_buffer.prioritized_fraction * 100))}P",
             "n_step": int(self.n_step),
         }
+        status.update(self.target_update_status())
+        return status
 
     def set_reheat_patience(self, patience: int) -> int:
         self.reheat_patience = max(1, int(patience))
@@ -897,6 +1172,19 @@ class DQNAgent:
             if queue:
                 self.n_step_queues[stream_state.get("stream_id", "single")] = queue
 
+    def replay_status(self) -> dict:
+        status = {
+            "mode": getattr(self.replay_buffer, "mode_label", "Hybrid"),
+            "capacity": int(self.replay_buffer.capacity),
+            "beta": float(getattr(self.replay_buffer, "priority_beta", 0.0)),
+            "mix": getattr(self.replay_buffer, "mix_label", "70U/30P"),
+            "n_step": int(self.n_step),
+        }
+        if hasattr(self.replay_buffer, "priority_alpha"):
+            status["alpha"] = float(self.replay_buffer.priority_alpha)
+        status.update(self.target_update_status())
+        return status
+
     def train_step(
         self,
         collect_diagnostics: bool = True,
@@ -915,7 +1203,7 @@ class DQNAgent:
                 "buffer_size": buffer_size,
                 "warmup_remaining": max(0, self.warmup_size - buffer_size),
                 "synced_target": False,
-                "target_sync_remaining": self.target_sync_interval,
+                "target_sync_remaining": int(self._target_sync_remaining()),
                 "grad_norm": None,
                 "did_update": False,
                 "update_count": 0,
@@ -926,6 +1214,9 @@ class DQNAgent:
                 "replay_beta": replay_status["beta"],
                 "n_step": int(self.n_step),
             }
+            info.update(self.target_update_status())
+            info.update(self.target_update_status())
+            info["current_lr"] = float(self.current_lr)
             self.last_train_info = info
             return info
 
@@ -945,6 +1236,7 @@ class DQNAgent:
                     "n_step": int(self.n_step),
                 }
             )
+            info.update(self.target_update_status())
             self.last_train_info = info
             return info
 
@@ -1005,9 +1297,17 @@ class DQNAgent:
             )
 
             self.train_steps += 1
+            if self.target_update_mode == "soft":
+                self._soft_update_target_network()
+                self.target_update_count += 1
             update_count += 1
-            if self.train_steps % self.target_sync_interval == 0:
-                self.target_net.load_state_dict(self.policy_net.state_dict())
+            if self.target_update_mode == "soft":
+                self._soft_update_target_network()
+                self.target_update_count += 1
+                synced_target = True
+            elif self.target_sync_interval > 0 and self.train_steps % self.target_sync_interval == 0:
+                self.sync_target_network()
+                self.target_update_count += 1
                 synced_target = True
 
             if collect_diagnostics:
@@ -1025,8 +1325,7 @@ class DQNAgent:
             "buffer_size": buffer_size,
             "warmup_remaining": 0,
             "synced_target": synced_target,
-            "target_sync_remaining": self.target_sync_interval
-            - (self.train_steps % self.target_sync_interval),
+            "target_sync_remaining": int(self._target_sync_remaining()),
             "did_update": bool(update_count),
             "update_count": int(update_count),
             "batch_size": int(self.batch_size),
@@ -1036,6 +1335,8 @@ class DQNAgent:
             "replay_beta": float(self.replay_buffer.priority_beta),
             "n_step": int(self.n_step),
         }
+        info.update(self.target_update_status())
+        info["synced_target"] = bool(synced_target)
         if collect_diagnostics and update_count:
             info.update(
                 {
@@ -1062,6 +1363,7 @@ class DQNAgent:
                     "grad_norm": self.last_train_info.get("grad_norm"),
                 }
             )
+        info["current_lr"] = float(self.current_lr)
         self.last_train_info = info
         return info
 
@@ -1133,6 +1435,36 @@ class DQNAgent:
             ),
             "epsilon": float(self.epsilon),
         }
+
+    def record_evaluation_result(self, episode_number: int, average_score: float) -> dict:
+        episode_number = int(episode_number)
+        average_score = float(average_score)
+        self.latest_eval_episode = episode_number
+        self.latest_eval_avg = average_score
+
+        improved = average_score > self.best_eval_avg + 1e-12
+        if improved:
+            self.best_eval_avg = average_score
+            self.best_eval_episode = episode_number
+            self.eval_stale_windows = 0
+            self._best_model_snapshot = self._build_best_model_snapshot()
+        else:
+            self.eval_stale_windows += 1
+
+        lr_decayed = False
+        if self.eval_stale_windows >= self.lr_decay_patience_windows:
+            lr_decayed = self._decay_learning_rate()
+            if lr_decayed:
+                self.eval_stale_windows = 0
+
+        status = self.evaluation_status()
+        status.update(
+            {
+                "improved": bool(improved),
+                "lr_decayed": bool(lr_decayed),
+            }
+        )
+        return status
 
     def _refresh_exploration_state(self) -> None:
         if (
@@ -1341,6 +1673,32 @@ class DQNAgent:
             "layer_stats": layer_stats,
         }
 
+    def record_evaluation_result(self, episode_number: int, average_score: float) -> dict:
+        self.latest_eval_episode = int(episode_number)
+        self.latest_eval_avg = float(average_score)
+
+        improved = average_score > self.best_eval_avg + 1e-12
+        if improved:
+            self.best_eval_avg = float(average_score)
+            self.best_eval_episode = int(episode_number)
+            self.eval_stale_windows = 0
+            self._best_model_snapshot = self._build_best_model_snapshot()
+        else:
+            self.eval_stale_windows += 1
+
+        lr_decayed = False
+        if self.eval_stale_windows >= self.lr_decay_patience_windows:
+            lr_decayed = self._decay_learning_rate()
+            if lr_decayed:
+                self.eval_stale_windows = 0
+
+        status = self.evaluation_status()
+        status.update({
+            "improved": bool(improved),
+            "lr_decayed": bool(lr_decayed),
+        })
+        return status
+
     def save(self, path: str, extra_state: dict | None = None) -> None:
         checkpoint = {
             "policy_state_dict": self.policy_net.state_dict(),
@@ -1363,17 +1721,50 @@ class DQNAgent:
                 "batch_size": int(self.batch_size),
                 "warmup_size": int(self.warmup_size),
                 "target_sync_interval": int(self.target_sync_interval),
+                "target_update_mode": self.target_update_mode,
+                "target_update_tau": float(self.target_update_tau),
+                "target_update_count": int(self.target_update_count),
                 "update_every_transitions": int(self.update_every_transitions),
                 "gradient_steps_per_update": int(self.gradient_steps_per_update),
                 "pending_transitions": int(self.pending_transitions),
                 "replay_capacity": int(self.replay_buffer.capacity),
+                "learning_rate": float(self.current_lr),
             },
+            "evaluation_state": {
+                "latest_eval_avg": float(self.latest_eval_avg),
+                "latest_eval_episode": int(self.latest_eval_episode),
+                "best_eval_avg": float(self.best_eval_avg),
+                "best_eval_episode": int(self.best_eval_episode),
+                "eval_stale_windows": int(self.eval_stale_windows),
+            },
+            "lr_decay_state": {
+                "lr_decay_factor": float(self.lr_decay_factor),
+                "lr_decay_min_lr": float(self.lr_decay_min_lr),
+                "lr_decay_patience_windows": int(self.lr_decay_patience_windows),
+                "lr_decay_count": int(self.lr_decay_count),
+            },
+            "best_model_snapshot": self._best_model_snapshot,
             "algorithm_config": {
                 "label": self.algorithm_label,
                 "variant": "double_dqn_n_step",
                 "n_step": int(self.n_step),
             },
             "n_step_state": self._serialize_n_step_queues(),
+            "evaluation_state": {
+                "latest_eval_avg": float(self.latest_eval_avg),
+                "latest_eval_episode": int(self.latest_eval_episode),
+                "best_eval_avg": float(self.best_eval_avg),
+                "best_eval_episode": int(self.best_eval_episode),
+                "eval_stale_windows": int(self.eval_stale_windows),
+                "has_best_model_snapshot": bool(self._best_model_snapshot is not None),
+            },
+            "lr_decay_state": {
+                "lr_decay_factor": float(self.lr_decay_factor),
+                "lr_decay_min_lr": float(self.lr_decay_min_lr),
+                "lr_decay_patience_windows": int(self.lr_decay_patience_windows),
+                "lr_decay_count": int(self.lr_decay_count),
+            },
+            "best_model_snapshot": self._best_model_snapshot,
             "exploration_state": {
                 "base_epsilon": float(self.base_epsilon),
                 "reheat_active_epsilon": self.reheat_active_epsilon,
@@ -1402,19 +1793,73 @@ class DQNAgent:
                 f"{checkpoint_hidden_layers} does not match agent architecture {self.hidden_layers}."
             )
 
-        self.policy_net.load_state_dict(checkpoint["policy_state_dict"])
-        self.target_net.load_state_dict(checkpoint["target_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self._move_optimizer_state_to_device()
+        policy_state_dict = checkpoint.get("policy_state_dict")
+        if policy_state_dict is not None:
+            self.policy_net.load_state_dict(policy_state_dict)
+        target_state_dict = checkpoint.get("target_state_dict")
+        if target_state_dict is not None:
+            self.target_net.load_state_dict(target_state_dict)
+        elif policy_state_dict is not None:
+            self.sync_target_network()
+        elif policy_state_dict is not None:
+            self.sync_target_network()
+        optimizer_state_dict = checkpoint.get("optimizer_state_dict")
+        runtime_config = _safe_optional_dict(checkpoint.get("runtime_config")) or {}
+        evaluation_state = _safe_optional_dict(checkpoint.get("evaluation_state")) or {}
+        lr_decay_state = _safe_optional_dict(checkpoint.get("lr_decay_state")) or {}
+        best_model_snapshot = _safe_optional_dict(checkpoint.get("best_model_snapshot"))
+        runtime_config = _safe_optional_dict(checkpoint.get("runtime_config")) or {}
+        if optimizer_state_dict is not None:
+            self.optimizer.load_state_dict(optimizer_state_dict)
+            self._move_optimizer_state_to_device()
+        else:
+            fallback_lr = runtime_config.get("learning_rate")
+            if fallback_lr is not None:
+                self._set_learning_rate(float(fallback_lr))
+
+        self.target_update_mode = (
+            str(runtime_config.get("target_update_mode", self.target_update_mode)).strip().lower() or "soft"
+        )
+        if self.target_update_mode not in {"soft", "hard"}:
+            self.target_update_mode = "soft"
+        self.target_update_tau = float(runtime_config.get("target_update_tau", self.target_update_tau))
+        self.target_update_count = int(runtime_config.get("target_update_count", self.target_update_count))
+
+        self.latest_eval_avg = float(evaluation_state.get("latest_eval_avg", self.latest_eval_avg))
+        self.latest_eval_episode = int(evaluation_state.get("latest_eval_episode", self.latest_eval_episode))
+        self.best_eval_avg = float(evaluation_state.get("best_eval_avg", self.best_eval_avg))
+        self.best_eval_episode = int(evaluation_state.get("best_eval_episode", self.best_eval_episode))
+        self.eval_stale_windows = int(evaluation_state.get("eval_stale_windows", self.eval_stale_windows))
+
+        self.lr_decay_factor = float(lr_decay_state.get("lr_decay_factor", self.lr_decay_factor))
+        self.lr_decay_min_lr = float(lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr))
+        self.lr_decay_patience_windows = int(
+            lr_decay_state.get("lr_decay_patience_windows", self.lr_decay_patience_windows)
+        )
+        self.lr_decay_count = int(lr_decay_state.get("lr_decay_count", self.lr_decay_count))
+        self._best_model_snapshot = copy.deepcopy(best_model_snapshot) if best_model_snapshot else None
         self.epsilon = float(checkpoint.get("epsilon", self.epsilon))
         self.n_games = int(checkpoint.get("n_games", 0))
         self.train_steps = int(checkpoint.get("train_steps", 0))
-        self.last_train_info = checkpoint.get("last_train_info", self.last_train_info)
-        runtime_config = checkpoint.get("runtime_config", {})
+        self.last_train_info = _safe_optional_dict(checkpoint.get("last_train_info")) or self.last_train_info
         self.batch_size = int(runtime_config.get("batch_size", self.batch_size))
         self.warmup_size = int(runtime_config.get("warmup_size", self.warmup_size))
         self.target_sync_interval = int(
             runtime_config.get("target_sync_interval", self.target_sync_interval)
+        )
+        self.target_update_mode = (
+            str(runtime_config.get("target_update_mode", self.target_update_mode))
+            .strip()
+            .lower()
+            or "soft"
+        )
+        if self.target_update_mode not in {"soft", "hard"}:
+            self.target_update_mode = "soft"
+        self.target_update_tau = float(
+            runtime_config.get("target_update_tau", self.target_update_tau)
+        )
+        self.target_update_count = int(
+            runtime_config.get("target_update_count", self.target_update_count)
         )
         self.update_every_transitions = int(
             runtime_config.get("update_every_transitions", self.update_every_transitions)
@@ -1425,7 +1870,7 @@ class DQNAgent:
         self.pending_transitions = int(
             runtime_config.get("pending_transitions", self.pending_transitions)
         )
-        algorithm_config = checkpoint.get("algorithm_config", {})
+        algorithm_config = _safe_optional_dict(checkpoint.get("algorithm_config")) or {}
         self.algorithm_label = str(
             algorithm_config.get("label", self.algorithm_label)
         )
@@ -1433,7 +1878,41 @@ class DQNAgent:
             1,
             int(algorithm_config.get("n_step", self.n_step)),
         )
-        exploration_state = checkpoint.get("exploration_state", {})
+        evaluation_state = _safe_optional_dict(checkpoint.get("evaluation_state")) or {}
+        self.latest_eval_avg = float(
+            evaluation_state.get("latest_eval_avg", self.latest_eval_avg)
+        )
+        self.latest_eval_episode = int(
+            evaluation_state.get("latest_eval_episode", self.latest_eval_episode)
+        )
+        self.best_eval_avg = float(
+            evaluation_state.get("best_eval_avg", self.best_eval_avg)
+        )
+        self.best_eval_episode = int(
+            evaluation_state.get("best_eval_episode", self.best_eval_episode)
+        )
+        self.eval_stale_windows = max(
+            0, int(evaluation_state.get("eval_stale_windows", self.eval_stale_windows))
+        )
+        lr_decay_state = _safe_optional_dict(checkpoint.get("lr_decay_state")) or {}
+        self.lr_decay_factor = float(
+            lr_decay_state.get("lr_decay_factor", self.lr_decay_factor)
+        )
+        self.lr_decay_min_lr = float(
+            lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr)
+        )
+        self.lr_decay_patience_windows = max(
+            1,
+            int(
+                lr_decay_state.get(
+                    "lr_decay_patience_windows", self.lr_decay_patience_windows
+                )
+            ),
+        )
+        self.lr_decay_count = int(
+            lr_decay_state.get("lr_decay_count", self.lr_decay_count)
+        )
+        exploration_state = _safe_optional_dict(checkpoint.get("exploration_state")) or {}
         self.base_epsilon = float(
             exploration_state.get("base_epsilon", checkpoint.get("epsilon", self.epsilon))
         )
@@ -1472,15 +1951,23 @@ class DQNAgent:
             exploration_state.get("exploration_mode", self.exploration_mode)
         )
         self._refresh_exploration_state()
+        best_model_snapshot = _safe_optional_dict(checkpoint.get("best_model_snapshot"))
+        self._best_model_snapshot = copy.deepcopy(best_model_snapshot) if best_model_snapshot else None
         replay_state = checkpoint.get("replay_buffer")
-        if replay_state:
+        if isinstance(replay_state, dict):
             self.replay_buffer.load_state_dict(replay_state)
         self._load_n_step_queues(checkpoint.get("n_step_state"))
+        self.learning_rate = float(self.current_lr)
         replay_status = self.replay_status()
         self.last_train_info["replay_mode"] = replay_status["mode"]
         self.last_train_info["replay_capacity"] = replay_status["capacity"]
         self.last_train_info["replay_beta"] = replay_status["beta"]
         self.last_train_info["n_step"] = int(self.n_step)
+        self.last_train_info["current_lr"] = float(self.current_lr)
+        self.last_train_info["target_update_mode"] = self.target_update_mode
+        self.last_train_info["target_update_tau"] = float(self.target_update_tau)
+        self.last_train_info["target_update_count"] = int(self.target_update_count)
+        self.last_train_info["target_sync_remaining"] = int(self._target_sync_remaining())
         return checkpoint.get("extra_state", {})
 
     def encode_state(self, game, out: np.ndarray | None = None) -> np.ndarray:

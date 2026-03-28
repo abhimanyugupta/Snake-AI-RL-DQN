@@ -42,7 +42,7 @@ Each step of training does this:
 6. sample a mixed mini-batch from memory
 7. choose the next action with the policy network, then evaluate that action with the target network
 8. bootstrap from that point using the Double DQN target
-9. occasionally copy the policy network into the target network
+9. softly move the target network toward the policy network after updates instead of doing only hard syncs
 
 ## Why hybrid replay matters
 
@@ -71,6 +71,14 @@ That usually makes targets less optimistic and helps training plateau less often
 Snake often needs a few safe moves before the payoff becomes obvious.
 This project now uses fixed 3-step returns so food progress and trap avoidance can push value backward across several moves instead of only one.
 
+## How evaluation and LR decay work
+
+The trainer also runs periodic greedy evaluation passes.
+Those passes update `latest_eval_avg` and `best_eval_avg`, and the dashboard can show both values read-only.
+
+When evaluation stalls for long enough, the learning rate decays toward a minimum value instead of staying fixed forever.
+At the end of a run, the best-eval snapshot is restored before the rendered evaluation tail and post-run results are shown.
+
 ## How device choice works here
 
 This project still aims to be a clear learning tool, but it now supports both CPU and CUDA.
@@ -81,3 +89,19 @@ This project still aims to be a clear learning tool, but it now supports both CP
 
 The training logic is the same either way.
 The main difference is where the neural-network forward and backward passes run.
+
+## Parallel CUDA schedule
+
+Parallel bulk mode keeps the teaching UI responsive while the worker schedule gets more aggressive on CUDA:
+
+- CUDA parallel mode uses a `64T -> 8 updates` cadence
+- CPU parallel mode keeps a lighter `32T -> 2 updates` cadence
+
+That schedule matches the larger GPU batch size and the short rendered evaluation tail at the end.
+## Current Stability Additions
+
+- The trainer now combines `Double DQN`, `3-step returns`, and `Hybrid replay`.
+- Target-network updates use soft Polyak averaging with `tau = 0.005`.
+- Parallel training performs periodic greedy evaluation every `200` completed training episodes across `5` evaluation runs.
+- The best greedy-evaluation checkpoint is kept in memory and restored before final checkpoint export so the saved model reflects the best measured policy, not just the latest weights.
+- Learning-rate decay is tied to stalled greedy evaluation windows rather than noisy training-score spikes.
