@@ -51,7 +51,7 @@ DEFAULT_N_STEP_RETURNS = 3
 DEFAULT_TARGET_UPDATE_TAU = 0.005
 DEFAULT_EVAL_STALE_WINDOWS = 0
 DEFAULT_LR_DECAY_FACTOR = 0.5
-DEFAULT_LR_DECAY_MIN_LR = 1e-5
+DEFAULT_LR_DECAY_MIN_LR = 5e-5
 DEFAULT_LR_DECAY_PATIENCE_WINDOWS = 3
 LEGACY_STATE_SIZE = 18
 LEGACY_STATE_SCHEMA_VERSION = 1
@@ -1381,6 +1381,12 @@ class DQNAgent:
                 self.reheat_active_epsilon = None
         self._refresh_exploration_state()
 
+    def _reheat_allowed_by_eval(self) -> bool:
+        if not np.isfinite(self.best_eval_avg) or not np.isfinite(self.latest_eval_avg):
+            return True
+        eval_guard_threshold = float(self.best_eval_avg) * 0.85
+        return float(self.latest_eval_avg) < eval_guard_threshold
+
     def record_episode_outcome(self, score: float, moving_avg: float) -> None:
         score = float(score)
         moving_avg = float(moving_avg)
@@ -1408,6 +1414,7 @@ class DQNAgent:
             and self.cooldown_remaining <= 0
             and self.plateau_counter >= self.reheat_patience
             and self.base_epsilon < self.reheat_epsilon
+            and self._reheat_allowed_by_eval()
         ):
             self.reheat_active_epsilon = max(
                 float(self.reheat_epsilon),
@@ -1832,7 +1839,10 @@ class DQNAgent:
         self.eval_stale_windows = int(evaluation_state.get("eval_stale_windows", self.eval_stale_windows))
 
         self.lr_decay_factor = float(lr_decay_state.get("lr_decay_factor", self.lr_decay_factor))
-        self.lr_decay_min_lr = float(lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr))
+        self.lr_decay_min_lr = max(
+            DEFAULT_LR_DECAY_MIN_LR,
+            float(lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr)),
+        )
         self.lr_decay_patience_windows = int(
             lr_decay_state.get("lr_decay_patience_windows", self.lr_decay_patience_windows)
         )
@@ -1898,8 +1908,9 @@ class DQNAgent:
         self.lr_decay_factor = float(
             lr_decay_state.get("lr_decay_factor", self.lr_decay_factor)
         )
-        self.lr_decay_min_lr = float(
-            lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr)
+        self.lr_decay_min_lr = max(
+            DEFAULT_LR_DECAY_MIN_LR,
+            float(lr_decay_state.get("lr_decay_min_lr", self.lr_decay_min_lr)),
         )
         self.lr_decay_patience_windows = max(
             1,
@@ -1912,6 +1923,8 @@ class DQNAgent:
         self.lr_decay_count = int(
             lr_decay_state.get("lr_decay_count", self.lr_decay_count)
         )
+        if self.current_lr < self.lr_decay_min_lr - 1e-12:
+            self._set_learning_rate(self.lr_decay_min_lr)
         exploration_state = _safe_optional_dict(checkpoint.get("exploration_state")) or {}
         self.base_epsilon = float(
             exploration_state.get("base_epsilon", checkpoint.get("epsilon", self.epsilon))

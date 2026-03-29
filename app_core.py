@@ -330,9 +330,6 @@ def hold_training_window_open(
         return
 
     while not game.quit_requested:
-        if completed_in_session() >= next_eval_checkpoint:
-            if not run_due_periodic_evals():
-                break
         events = pygame.event.get()
         scaled_events = game.scale_events(events)
         game.handle_system_events(events)
@@ -342,7 +339,6 @@ def hold_training_window_open(
             if event.type == pygame.KEYDOWN and event.key in (
                 pygame.K_RETURN,
                 pygame.K_KP_ENTER,
-                pygame.K_q,
                 pygame.K_ESCAPE,
             ):
                 return
@@ -610,10 +606,11 @@ def run_parallel_greedy_evaluation(
             score = 0
 
             while True:
+                pygame.event.pump()
                 action_info = agent.get_action_details(state, greedy=True)
                 reward, game_over, score = eval_env.play_step(
-                    action_info["action"],
-                    events=[],
+                        action_info["action"],
+                        events=[],
                     draw_frame=False,
                     apply_pacing=False,
                 )
@@ -855,11 +852,11 @@ def build_training_finished_view(
     final_view["overlay_title"] = "Training finished"
     if recent_episode_replays:
         final_view["overlay_subtitle"] = (
-            "Replay one of the last 3 captured runs, or press Enter, Q, or Esc to close."
+            "Replay one of the last 3 captured runs, or press Enter or Esc to close."
         )
         final_view["overlay_buttons"] = build_replay_overlay_buttons(game, recent_episode_replays)
     else:
-        final_view["overlay_subtitle"] = "Press Enter, Q, Esc, or close the window."
+        final_view["overlay_subtitle"] = "Press Enter, Esc, or close the window."
         final_view["overlay_buttons"] = []
     if recent_replays_panel is not None:
         final_view["recent_replays"] = recent_replays_panel
@@ -947,7 +944,6 @@ def play_episode_replay(game, dashboard, agent, episode_replay):
                 pygame.K_RETURN,
                 pygame.K_KP_ENTER,
                 pygame.K_SPACE,
-                pygame.K_q,
                 pygame.K_ESCAPE,
             ):
                 return
@@ -1797,6 +1793,16 @@ def train_parallel_mode(
                 step_count = 0
 
                 while not game.quit_requested and not finish_requested:
+                    pending_events = pygame.event.get() if game.render else []
+                    if pending_events:
+                        pending_scaled_events = game.scale_events(pending_events) if game.render else []
+                        dashboard.sync_graph_rect(game)
+                        dashboard.handle_events(pending_scaled_events)
+                        game.handle_system_events(pending_events)
+                        if finish_session_requested(pending_scaled_events):
+                            finish_requested = True
+                        if game.quit_requested or finish_requested:
+                            break
                     action_info = agent.get_action_details(state, greedy=True)
                     reward, game_over, score = eval_env.play_step(
                         action_info["action"],
@@ -2021,6 +2027,7 @@ def train_parallel_mode(
         if encode_elapsed > 0.0:
             record_perf_timing(session_perf, "encode", encode_elapsed)
 
+        pygame.event.pump()
         replay_started = time.perf_counter()
         emitted_transitions = agent.remember_batch(
             env_states,
@@ -2030,9 +2037,11 @@ def train_parallel_mode(
             dones_batch,
         )
         record_perf_timing(session_perf, "replay", time.perf_counter() - replay_started)
+        pygame.event.pump()
         env_states, next_states_batch = next_states_batch, env_states
         session_perf["env_steps"] += parallel_envs
         collect_diagnostics = bool(completed_records or frame_due or (bulk_iteration % 16 == 0))
+        pygame.event.pump()
         train_started = time.perf_counter()
         train_info = agent.train_step(
             collect_diagnostics=collect_diagnostics,
@@ -2076,7 +2085,9 @@ def train_parallel_mode(
             if len(pending_metric_entries) >= 8:
                 flush_metric_buffer(metrics_log_path, pending_metric_entries)
             if agent.n_games % checkpoint_every == 0:
+                pygame.event.pump()
                 save_parallel_checkpoint()
+                pygame.event.pump()
 
             completed_since_print += 1
             if completed_in_session() < bulk_target:
@@ -2157,15 +2168,20 @@ def train_parallel_mode(
 
     if game.quit_requested:
         return best_score, last_transition, False, "parallel"
-    if finish_requested:
-        return best_score, last_transition, True, "parallel"
+    early_finish_requested = bool(finish_requested)
 
     restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
-    restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
     agent.best_eval_restored = True
+    if early_finish_requested:
+        finish_requested = False
     remaining_goal = max(0, dashboard.get_episode_goal() - completed_in_session())
-    eval_runs = min(eval_tail_episodes, remaining_goal) if should_run_eval_tail() else 0
+    eval_runs = (
+        max(1, int(eval_tail_episodes))
+        if early_finish_requested
+        else (min(eval_tail_episodes, remaining_goal) if should_run_eval_tail() else 0)
+    )
     final_eval_scores = []
+    allow_eval_finish_interrupt = not early_finish_requested
     for _ in range(eval_runs):
         if game.quit_requested:
             break
@@ -2186,12 +2202,12 @@ def train_parallel_mode(
                 dashboard.sync_graph_rect(game)
                 dashboard.handle_events(scaled_events)
                 game.handle_system_events(events)
-                if finish_session_requested(scaled_events):
+                if allow_eval_finish_interrupt and finish_session_requested(scaled_events):
                     finish_requested = True
 
             if game.quit_requested:
                 break
-            if finish_requested:
+            if allow_eval_finish_interrupt and finish_requested:
                 break
 
             agent.set_reheat_patience(dashboard.get_stall_threshold())

@@ -110,14 +110,14 @@ class TextInputControl:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             was_active = self.active
             self.active = self.rect.collidepoint(event.pos)
-            return was_active or self.active
+            return self.active
 
         if not self.active or event.type != pygame.KEYDOWN:
             return False
 
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
             self.active = False
-            return True
+            return False
 
         if event.key == pygame.K_BACKSPACE:
             self.text = self.text[:-1]
