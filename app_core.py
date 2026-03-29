@@ -1138,7 +1138,10 @@ def build_post_run_base_view(
     auto_focus_results=True,
 ):
     dashboard.set_results_ready(True, auto_focus=auto_focus_results)
-    state = agent.encode_state(game)
+    try:
+        state = agent.encode_state(game)
+    except IndexError:
+        state = np.zeros(len(agent.STATE_LABELS), dtype=np.float32)
     action_info = agent.get_action_details(state, greedy=True)
     context = build_training_context(
         "Training finished",

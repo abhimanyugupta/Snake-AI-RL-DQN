@@ -131,6 +131,8 @@ class TextInputControl:
 
     def get_int(self, default=1, minimum=1, maximum=999999):
         raw_value = self.text.strip()
+        if self.active:
+            raw_value = self.last_valid_value.strip() if self.last_valid_value.strip() else raw_value
         try:
             if raw_value:
                 value = int(raw_value)
@@ -316,7 +318,7 @@ class TrainingDashboard:
         self.keep_open_toggle = ToggleControl("Keep open [K]", True, col_x + toggle_w + 10, y, toggle_w, 26)
         
         self.episode_input = TextInputControl(
-            "Episode goal",
+            "Total Runs",
             initial_episode_goal,
             dock_inner_x,
             dock_row_y,

@@ -234,6 +234,12 @@ class SnakeLogicEnv:
             return
         head_index = self._cell_index_from_point(self.head)
         tail_index = self._cell_index_from_point(self.snake[-1])
+        if not (0 <= head_index < self.board_cell_count and 0 <= tail_index < self.board_cell_count):
+            self._occupied_cells[:] = b"\x00" * self.board_cell_count
+            self._snake_cell_indices = []
+            self._head_cell_index = -1
+            self._tail_cell_index = -1
+            return
         if (
             len(self._snake_cell_indices) != len(self.snake)
             or self._head_cell_index != head_index
@@ -249,6 +255,12 @@ class SnakeLogicEnv:
         self._snake_cell_indices = []
         for segment in self.snake:
             cell_index = self._cell_index_from_point(segment)
+            if not (0 <= cell_index < self.board_cell_count):
+                self._occupied_cells[:] = b"\x00" * self.board_cell_count
+                self._snake_cell_indices = []
+                self._head_cell_index = -1
+                self._tail_cell_index = -1
+                return
             self._snake_cell_indices.append(cell_index)
             self._occupied_cells[cell_index] = 1
         if self._snake_cell_indices:
