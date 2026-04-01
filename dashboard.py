@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 try:
     import pygame
 except ImportError as exc:  # pragma: no cover - dependency guard
@@ -402,6 +404,8 @@ class TrainingDashboard:
         self.deep_episode_rewards = []
         self.deep_loss_history = []
         self.deep_loss_average_history = []
+        self.deep_eval_average_history = []
+        self.deep_eval_best_history = []
         self.baseline_scores = []
         self.baseline_average_history = []
         self.baseline_best_history = []
@@ -514,6 +518,8 @@ class TrainingDashboard:
             "episode_rewards": list(self.deep_episode_rewards),
             "losses": list(self.deep_loss_history),
             "loss_moving_avg": list(self.deep_loss_average_history),
+            "eval_average": list(self.deep_eval_average_history),
+            "eval_best": list(self.deep_eval_best_history),
         }
 
     def export_baseline_history(self):
@@ -556,14 +562,26 @@ class TrainingDashboard:
         return step_number <= 1 or (step_number % self.render_every_n_steps == 0)
 
     def load_deep_history(self, history):
+        def finite_series(values):
+            cleaned = []
+            for value in values:
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    numeric = 0.0
+                if not math.isfinite(numeric):
+                    numeric = 0.0
+                cleaned.append(numeric)
+            return cleaned
+
         self.deep_scores = list(history.get("scores", []))
         self.deep_average_history = list(history.get("moving_avg", []))
         self.deep_best_history = list(history.get("best_scores", []))
         self.deep_episode_rewards = list(history.get("episode_rewards", []))
-        self.deep_loss_history = [float(value) for value in history.get("losses", [])]
-        self.deep_loss_average_history = [
-            float(value) for value in history.get("loss_moving_avg", [])
-        ]
+        self.deep_loss_history = finite_series(history.get("losses", []))
+        self.deep_loss_average_history = finite_series(history.get("loss_moving_avg", []))
+        self.deep_eval_average_history = finite_series(history.get("eval_average", []))
+        self.deep_eval_best_history = finite_series(history.get("eval_best", []))
 
     def set_baseline_history(self, history):
         self.baseline_scores = list(history.get("scores", []))
@@ -574,7 +592,7 @@ class TrainingDashboard:
     def set_baseline_visibility(self, visible):
         self.baseline_visible = bool(visible)
 
-    def record_deep_episode(self, score, episode_reward, loss=None):
+    def record_deep_episode(self, score, episode_reward, loss=None, eval_average=None, eval_best=None):
         self.deep_scores.append(score)
         self.deep_episode_rewards.append(float(episode_reward))
         recent_scores = self.deep_scores[-20:]
@@ -583,9 +601,43 @@ class TrainingDashboard:
         best_score = max(self.deep_best_history[-1], score) if self.deep_best_history else score
         self.deep_best_history.append(best_score)
         loss_value = 0.0 if loss is None else float(loss)
+        if not math.isfinite(loss_value):
+            loss_value = 0.0
         self.deep_loss_history.append(loss_value)
         recent_losses = self.deep_loss_history[-20:]
         self.deep_loss_average_history.append(sum(recent_losses) / len(recent_losses))
+        previous_eval_average = self.deep_eval_average_history[-1] if self.deep_eval_average_history else 0.0
+        previous_eval_best = self.deep_eval_best_history[-1] if self.deep_eval_best_history else 0.0
+        eval_average_value = previous_eval_average
+        eval_best_value = previous_eval_best
+        if eval_average is not None:
+            candidate = float(eval_average)
+            if math.isfinite(candidate):
+                eval_average_value = candidate
+        if eval_best is not None:
+            candidate = float(eval_best)
+            if math.isfinite(candidate):
+                eval_best_value = candidate
+        self.deep_eval_average_history.append(float(eval_average_value))
+        self.deep_eval_best_history.append(float(eval_best_value))
+
+    def record_evaluation_snapshot(self, latest_eval_avg, best_eval_avg, episode_number=None):
+        total = len(self.deep_scores)
+        if total <= 0:
+            return
+        latest_value = float(latest_eval_avg)
+        best_value = float(best_eval_avg)
+        if not math.isfinite(latest_value) or not math.isfinite(best_value):
+            return
+        target_index = total - 1 if episode_number is None else max(0, min(total - 1, int(episode_number) - 1))
+        while len(self.deep_eval_average_history) < total:
+            last_value = self.deep_eval_average_history[-1] if self.deep_eval_average_history else 0.0
+            self.deep_eval_average_history.append(float(last_value))
+        while len(self.deep_eval_best_history) < total:
+            last_value = self.deep_eval_best_history[-1] if self.deep_eval_best_history else 0.0
+            self.deep_eval_best_history.append(float(last_value))
+        self.deep_eval_average_history[target_index] = latest_value
+        self.deep_eval_best_history[target_index] = best_value
 
     def sync_graph_rect(self, game):
         data = game.dashboard_data
@@ -593,6 +645,14 @@ class TrainingDashboard:
             self.graph_rect = data["_graph_rect"]
         else:
             self.graph_rect = None
+        if data and "_graph_plot_rect" in data:
+            self.graph_plot_rect = data.get("_graph_plot_rect")
+        else:
+            self.graph_plot_rect = None
+        if data and "_graph_bar_rect" in data:
+            self.graph_bar_rect = data.get("_graph_bar_rect")
+        else:
+            self.graph_bar_rect = None
         if data and "_results_graph_rects" in data:
             self.results_graph_rects = [rect for rect in data.get("_results_graph_rects", []) if rect]
         else:
@@ -610,10 +670,12 @@ class TrainingDashboard:
                 total = max(total, len(self.baseline_scores))
         if self.show_avg_toggle.value:
             total = max(total, len(self.deep_average_history))
+            total = max(total, len(self.deep_eval_average_history))
             if self.baseline_visible:
                 total = max(total, len(self.baseline_average_history))
         if self.show_best_toggle.value:
             total = max(total, len(self.deep_best_history))
+            total = max(total, len(self.deep_eval_best_history))
             if self.baseline_visible:
                 total = max(total, len(self.baseline_best_history))
         return total
@@ -625,6 +687,8 @@ class TrainingDashboard:
             len(self.deep_best_history),
             len(self.deep_loss_history),
             len(self.deep_loss_average_history),
+            len(self.deep_eval_average_history),
+            len(self.deep_eval_best_history),
         )
 
     def handle_events(self, events):
@@ -904,13 +968,8 @@ class TrainingDashboard:
         completed_progress = min(completed_runs, max(0, int(episode_goal)))
         exploration = agent.exploration_status()
         exploration_mode = str(exploration.get("mode", "decay")).title()
-        exploration_stall = (
-            f"{exploration.get('plateau_counter', 0)}/"
-            f"{exploration.get('plateau_patience', 0)}"
-        )
-        exploration_summary = (
-            f"{exploration.get('reheat_count', 0)} | cd {exploration.get('cooldown_remaining', 0)}"
-        )
+        exploration_stall = self._format_stall_readout(exploration)
+        exploration_summary = self._format_exploration_summary(exploration)
         replay_status = agent.replay_status()
         replay_summary = (
             f"{replay_status.get('mode', 'Hybrid')} | "
@@ -1104,10 +1163,24 @@ class TrainingDashboard:
                 "thickness": 2,
             },
             {
+                "label": "Eval avg",
+                "values": self.deep_eval_average_history,
+                "visible": self.show_avg_toggle.value and bool(self.deep_eval_average_history),
+                "color": (184, 132, 255),
+                "thickness": 2,
+            },
+            {
                 "label": "Deep best",
                 "values": self.deep_best_history,
                 "visible": self.show_best_toggle.value,
                 "color": (255, 196, 68),
+                "thickness": 1,
+            },
+            {
+                "label": "Eval best",
+                "values": self.deep_eval_best_history,
+                "visible": self.show_best_toggle.value and bool(self.deep_eval_best_history),
+                "color": (255, 150, 220),
                 "thickness": 1,
             },
             {
@@ -1164,10 +1237,24 @@ class TrainingDashboard:
                 "thickness": 2,
             },
             {
+                "label": "Eval avg",
+                "values": list(self.deep_eval_average_history),
+                "visible": bool(self.deep_eval_average_history),
+                "color": (184, 132, 255),
+                "thickness": 2,
+            },
+            {
                 "label": "Best",
                 "values": list(self.deep_best_history),
                 "visible": True,
                 "color": (255, 196, 68),
+                "thickness": 1,
+            },
+            {
+                "label": "Eval best",
+                "values": list(self.deep_eval_best_history),
+                "visible": bool(self.deep_eval_best_history),
+                "color": (255, 150, 220),
                 "thickness": 1,
             },
         ]
@@ -1207,7 +1294,7 @@ class TrainingDashboard:
             f"Final epsilon: {agent.epsilon:.3f}",
             (
                 f"Exploration: {exploration_mode} | reheats {exploration.get('reheat_count', 0)}"
-                f" | stall {exploration.get('plateau_counter', 0)}/{exploration.get('plateau_patience', 0)}"
+                f" | stall episodes {self._format_stall_readout(exploration)}"
                 f" | cooldown {exploration.get('cooldown_remaining', 0)}"
             ),
             f"Device: {agent.device_label}",
@@ -1218,9 +1305,6 @@ class TrainingDashboard:
             ),
             f"Parallel envs: {parallel_envs}" if trainer_mode == "parallel" else "Parallel envs: n/a",
             f"Replay: {replay_summary}",
-            *training_status_lines,
-            *training_status_lines,
-            *training_status_lines,
             *training_status_lines,
             f"n-step returns: {replay_status.get('n_step', 1)}",
             f"Architecture: {agent.architecture_label}",
@@ -1576,31 +1660,37 @@ class TrainingDashboard:
             ),
         ]
 
-    def _build_training_status_lines(self, agent, train_info):
-        evaluation_status = agent.evaluation_status()
-        current_lr = self._format_learning_rate(train_info.get("current_lr", agent.current_lr))
-        latest_eval_avg = self._format_metric(evaluation_status.get("latest_eval_avg"))
-        best_eval_avg = self._format_metric(evaluation_status.get("best_eval_avg"))
-        target_update_mode = str(
-            train_info.get("target_update_mode", agent.target_update_mode)
-        ).strip().lower() or "soft"
-        update_every_transitions = int(
-            train_info.get("update_every_transitions", agent.update_every_transitions)
-        )
-        gradient_steps_per_update = int(
-            train_info.get("gradient_steps_per_update", agent.gradient_steps_per_update)
-        )
-        update_label = "update" if gradient_steps_per_update == 1 else "updates"
-        return [
-            (
-                f"Training status: LR {current_lr} | latest eval avg {latest_eval_avg} | "
-                f"best eval avg {best_eval_avg}"
-            ),
-            (
-                f"Target update: {target_update_mode} | replay ratio: "
-                f"{update_every_transitions}T -> {gradient_steps_per_update} {update_label}"
-            ),
-        ]
+    def _format_stall_readout(self, exploration):
+        counter = int(exploration.get("plateau_counter", 0))
+        threshold = int(max(1, exploration.get("plateau_patience", 1)))
+        reason = str(exploration.get("stall_reason", "")).strip().lower()
+        if reason == "reheat active":
+            suffix = " active"
+        elif reason == "eval guard":
+            suffix = " eval-guard"
+        elif reason == "eval blocked":
+            suffix = " eval-blocked"
+        elif reason == "cooldown":
+            suffix = " cooldown"
+        else:
+            suffix = ""
+        return f"{counter}/{threshold}{suffix}"
+
+    def _format_exploration_summary(self, exploration):
+        parts = [str(int(exploration.get("reheat_count", 0)))]
+        cooldown_remaining = int(exploration.get("cooldown_remaining", 0))
+        if cooldown_remaining > 0:
+            parts.append(f"cd {cooldown_remaining}")
+        reason = str(exploration.get("stall_reason", "")).strip().lower()
+        if reason == "reheat active":
+            parts.append("reheat")
+        elif reason == "eval guard":
+            parts.append("guard")
+        elif reason == "eval blocked":
+            parts.append("blocked")
+        elif reason == "cooldown":
+            parts.append("cooldown")
+        return " | ".join(parts)
 
     def _format_learning_rate(self, value):
         if value is None:

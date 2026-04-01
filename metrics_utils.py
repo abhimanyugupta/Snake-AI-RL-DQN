@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -65,8 +66,29 @@ def group_entries_by_algo(entries: Iterable[dict]) -> Dict[str, List[dict]]:
 
 def build_history(entries: Iterable[dict]) -> dict:
     rows = list(entries)
+    eval_average = []
+    eval_best = []
+    current_eval_average = 0.0
+    current_eval_best = 0.0
+    for item in rows:
+        latest_eval_avg = item.get("latest_eval_avg")
+        best_eval_avg = item.get("best_eval_avg")
+        if latest_eval_avg is not None:
+            latest_eval_value = float(latest_eval_avg)
+            if math.isfinite(latest_eval_value):
+                current_eval_average = latest_eval_value
+        if best_eval_avg is not None:
+            best_eval_value = float(best_eval_avg)
+            if math.isfinite(best_eval_value):
+                current_eval_best = best_eval_value
+        eval_average.append(float(current_eval_average))
+        eval_best.append(float(current_eval_best))
     losses = [
-        0.0 if item.get("loss") is None else float(item.get("loss", 0.0))
+        (
+            0.0
+            if item.get("loss") is None or not math.isfinite(float(item.get("loss", 0.0)))
+            else float(item.get("loss", 0.0))
+        )
         for item in rows
     ]
     loss_moving_avg = []
@@ -81,6 +103,8 @@ def build_history(entries: Iterable[dict]) -> dict:
         "episode_rewards": [float(item.get("episode_reward", 0.0)) for item in rows],
         "losses": losses,
         "loss_moving_avg": loss_moving_avg,
+        "eval_average": eval_average,
+        "eval_best": eval_best,
     }
 
 

@@ -682,61 +682,6 @@ class SnakeGameAI(SnakeLogicEnv):
         if new_direction != opposite[self.direction]:
             self.direction = new_direction
 
-    def _move(self, action=None):
-        """
-        Move the snake.
-
-        The agent action is a one-hot list:
-        [1, 0, 0] = keep going straight
-        [0, 1, 0] = turn right
-        [0, 0, 1] = turn left
-        """
-        if action is not None:
-            action = list(action)
-            if len(action) != 3 or sum(action) != 1:
-                raise ValueError("Action must be a one-hot list like [1, 0, 0].")
-            self.direction = self._direction_for_action(action)
-
-        self.head = self._point_from_direction(self.head, self.direction)
-
-    def _direction_for_action(self, action):
-        clockwise = [Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP]
-        current_index = clockwise.index(self.direction)
-        action_index = list(action).index(1)
-
-        if action_index == 0:
-            return clockwise[current_index]
-        if action_index == 1:
-            return clockwise[(current_index + 1) % 4]
-        return clockwise[(current_index - 1) % 4]
-
-    def _point_from_direction(self, point, direction):
-        if direction == Direction.RIGHT:
-            return Point(point.x + self.block_size, point.y)
-        if direction == Direction.LEFT:
-            return Point(point.x - self.block_size, point.y)
-        if direction == Direction.UP:
-            return Point(point.x, point.y - self.block_size)
-        return Point(point.x, point.y + self.block_size)
-
-    def _turn_right(self, direction):
-        turns = {
-            Direction.RIGHT: Direction.DOWN,
-            Direction.DOWN: Direction.LEFT,
-            Direction.LEFT: Direction.UP,
-            Direction.UP: Direction.RIGHT,
-        }
-        return turns[direction]
-
-    def _turn_left(self, direction):
-        turns = {
-            Direction.RIGHT: Direction.UP,
-            Direction.UP: Direction.LEFT,
-            Direction.LEFT: Direction.DOWN,
-            Direction.DOWN: Direction.RIGHT,
-        }
-        return turns[direction]
-
     def _draw_scene(self):
         if not self.render or self.display is None:
             return
@@ -2108,10 +2053,15 @@ class SnakeGameAI(SnakeLogicEnv):
                 if hover_index < len(values):
                     value = values[hover_index]
                     color = tuple(item.get("color", (200, 200, 200)))
-                    normalized = (value - min_value) / value_span
-                    point_y = plot_rect.bottom - int(normalized * plot_rect.height)
-                    point_y = max(plot_rect.top, min(plot_rect.bottom, point_y))
-                    pygame.draw.circle(self.display, color, (px, point_y), 4)
+                    try:
+                        numeric_value = float(value)
+                    except (TypeError, ValueError):
+                        numeric_value = None
+                    if numeric_value is not None and math.isfinite(numeric_value):
+                        normalized = (numeric_value - min_value) / value_span
+                        point_y = plot_rect.bottom - int(normalized * plot_rect.height)
+                        point_y = max(plot_rect.top, min(plot_rect.bottom, point_y))
+                        pygame.draw.circle(self.display, color, (px, point_y), 4)
                     tooltip_lines.append(
                         f"{item.get('label', 'Series')}: {self._format_axis_value(value)}"
                     )
@@ -2204,7 +2154,14 @@ class SnakeGameAI(SnakeLogicEnv):
     def _resolve_graph_max_value(self, series, view_start, view_end, *, min_value=0.0, min_ceiling=1.0):
         max_value = float(min_ceiling)
         for item in series:
-            values = item.get("values", [])[view_start:view_end]
+            values = []
+            for raw_value in item.get("values", [])[view_start:view_end]:
+                try:
+                    numeric = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(numeric):
+                    values.append(numeric)
             if values:
                 max_value = max(max_value, max(values))
         if max_value <= min_value:
@@ -2219,9 +2176,19 @@ class SnakeGameAI(SnakeLogicEnv):
 
         value_span = max(1e-6, max_value - min_value)
         points = []
+        segments = []
         for index, value in enumerate(values):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                numeric = None
+            if numeric is None or not math.isfinite(numeric):
+                if len(points) >= 2:
+                    segments.append(points)
+                points = []
+                continue
             ratio_x = index / (len(values) - 1)
-            ratio_y = (value - min_value) / value_span
+            ratio_y = (numeric - min_value) / value_span
             x = rect.x + int(ratio_x * rect.width)
             y = rect.bottom - int(ratio_y * rect.height)
             
@@ -2230,10 +2197,18 @@ class SnakeGameAI(SnakeLogicEnv):
             points.append((x, y))
 
         if len(points) >= 2:
-            # Draw premium smoothed line
-            pygame.draw.lines(self.display, color, False, points, thickness)
+            segments.append(points)
+        for segment in segments:
+            pygame.draw.lines(self.display, color, False, segment, thickness)
 
     def _format_axis_value(self, value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        if not math.isfinite(numeric):
+            return "n/a"
+        value = numeric
         if value >= 10:
             return f"{value:.0f}"
         if value >= 1:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import copy
-
 import argparse
 import copy
 import os
@@ -46,16 +44,6 @@ DEFAULT_REWARD_CONFIG = {"food": 10.0, "death": -10.0, "step": 0.0}
 DEFAULT_TRAINER_MODE = "single"
 SUPPORTED_TRAINER_MODES = ("single", "parallel")
 SUMMARY_IMAGE_NAME = "training_summary.png"
-PARALLEL_EVAL_INTERVAL_EPISODES = 200
-PARALLEL_EVAL_ROUNDS = 5
-DEFAULT_EVAL_TAIL_EPISODES = 5
-PARALLEL_CPU_BATCH_SIZE = 512
-PARALLEL_CUDA_BATCH_SIZE = 1024
-PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS = 32
-PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS = 64
-PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE = 2
-PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE = 8
-PARALLEL_WARMUP_SIZE = 4_096
 PARALLEL_EVAL_INTERVAL_EPISODES = 200
 PARALLEL_EVAL_ROUNDS = 5
 DEFAULT_EVAL_TAIL_EPISODES = 5
@@ -143,66 +131,6 @@ def resolve_hidden_layers_for_session(checkpoint_path, resume, explicit_hidden_l
         return list(explicit_hidden_layers)
 
     return list(DEFAULT_HIDDEN_LAYERS)
-
-
-def _clone_torch_state_dict_to_cpu(state_dict):
-    cloned_state = {}
-    for key, value in dict(state_dict or {}).items():
-        if hasattr(value, "detach"):
-            cloned_state[key] = value.detach().cpu().clone()
-        else:
-            cloned_state[key] = copy.deepcopy(value)
-    return cloned_state
-
-
-def snapshot_agent_weights(agent):
-    return {
-        "policy_state_dict": _clone_torch_state_dict_to_cpu(agent.policy_net.state_dict()),
-        "target_state_dict": _clone_torch_state_dict_to_cpu(agent.target_net.state_dict()),
-    }
-
-
-def restore_agent_weights(agent, weight_snapshot):
-    if not weight_snapshot:
-        return False
-
-    policy_state = weight_snapshot.get("policy_state_dict")
-    target_state = weight_snapshot.get("target_state_dict") or policy_state
-    if policy_state:
-        agent.policy_net.load_state_dict(policy_state)
-    if target_state:
-        agent.target_net.load_state_dict(target_state)
-    else:
-        agent.target_net.load_state_dict(agent.policy_net.state_dict())
-    agent.target_net.eval()
-    return True
-
-
-def initialize_best_eval_tracking(agent, checkpoint_extra_state):
-    best_eval_state = dict((checkpoint_extra_state or {}).get("best_eval", {}))
-    agent.best_eval_avg = float(best_eval_state.get("best_eval_avg", float("-inf")))
-    agent.best_eval_round = dict(best_eval_state.get("best_eval_round", {}))
-    agent.best_eval_snapshot = best_eval_state.get("best_eval_snapshot")
-    return best_eval_state
-
-
-def get_best_eval_state(agent):
-    return {
-        "best_eval_avg": float(getattr(agent, "best_eval_avg", float("-inf"))),
-        "best_eval_round": copy.deepcopy(getattr(agent, "best_eval_round", {})),
-        "best_eval_snapshot": copy.deepcopy(getattr(agent, "best_eval_snapshot", None)),
-    }
-
-
-def update_best_eval_tracking(agent, eval_average, eval_round_summary):
-    current_best = float(getattr(agent, "best_eval_avg", float("-inf")))
-    if float(eval_average) <= current_best:
-        return False
-
-    agent.best_eval_avg = float(eval_average)
-    agent.best_eval_round = dict(eval_round_summary or {})
-    agent.best_eval_snapshot = snapshot_agent_weights(agent)
-    return True
 
 
 def hold_training_window_open(
@@ -430,7 +358,18 @@ def build_metric_entry(
     steps,
     buffer_size,
     best_score,
+    latest_eval_avg=None,
+    best_eval_avg=None,
 ):
+    def finite_or_none(value):
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if np.isfinite(numeric) else None
+
     return {
         "algo": algo,
         "episode": int(episode),
@@ -438,10 +377,12 @@ def build_metric_entry(
         "episode_reward": float(episode_reward),
         "moving_avg_20": float(moving_avg),
         "epsilon": float(epsilon),
-        "loss": None if loss is None else float(loss),
+        "loss": finite_or_none(loss),
         "steps": int(steps),
         "buffer_size": int(buffer_size),
         "best_score": int(best_score),
+        "latest_eval_avg": finite_or_none(latest_eval_avg),
+        "best_eval_avg": finite_or_none(best_eval_avg),
     }
 
 
@@ -522,7 +463,13 @@ def run_tabular_baseline(episodes, reward_config, metrics_log_path):
 def _clone_torch_state_dict_to_cpu(state_dict):
     if not isinstance(state_dict, dict):
         return None
-    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
+    cloned = {}
+    for key, value in state_dict.items():
+        if hasattr(value, "detach"):
+            cloned[key] = value.detach().cpu().clone()
+        else:
+            cloned[key] = copy.deepcopy(value)
+    return cloned
 
 
 def snapshot_agent_weights(agent):
@@ -544,6 +491,7 @@ def restore_agent_weights(agent, weight_snapshot):
         agent.target_net.load_state_dict(target_state_dict)
     else:
         agent.sync_target_network()
+    agent.target_net.eval()
     return True
 
 
@@ -551,20 +499,40 @@ def initialize_best_eval_tracking(agent, checkpoint_extra_state):
     best_eval_state = {}
     if isinstance(checkpoint_extra_state, dict):
         best_eval_state = checkpoint_extra_state.get("best_eval", {}) or {}
+    best_eval_avg = best_eval_state.get(
+        "best_eval_avg",
+        best_eval_state.get("average_score", getattr(agent, "best_eval_avg", float("-inf"))),
+    )
+    best_eval_episode = best_eval_state.get(
+        "best_eval_episode",
+        best_eval_state.get("episode", getattr(agent, "best_eval_episode", -1)),
+    )
+    best_eval_round = best_eval_state.get(
+        "best_eval_round",
+        best_eval_state.get("round_index", getattr(agent, "best_eval_round", -1)),
+    )
+    try:
+        best_eval_avg = float(best_eval_avg)
+    except (TypeError, ValueError):
+        best_eval_avg = float("-inf")
+    if not np.isfinite(best_eval_avg):
+        best_eval_avg = float("-inf")
+    agent.best_eval_avg = best_eval_avg
+    agent.best_eval_episode = int(best_eval_episode)
     agent.best_eval_snapshot = copy.deepcopy(getattr(agent, "_best_model_snapshot", None))
     if not isinstance(agent.best_eval_snapshot, dict):
         agent.best_eval_snapshot = None
-    agent.best_eval_round = int(best_eval_state.get("round_index", -1))
-    agent.best_eval_restored = False
+    agent.best_eval_round = int(best_eval_round)
+    agent.best_eval_restored = bool(best_eval_state.get("restored", False))
     agent.latest_eval_summary = {}
-    return best_eval_state
+    return get_best_eval_state(agent)
 
 
 def get_best_eval_state(agent):
     return {
-        "average_score": float(getattr(agent, "best_eval_avg", float("-inf"))),
-        "episode": int(getattr(agent, "best_eval_episode", -1)),
-        "round_index": int(getattr(agent, "best_eval_round", -1)),
+        "best_eval_avg": float(getattr(agent, "best_eval_avg", float("-inf"))),
+        "best_eval_episode": int(getattr(agent, "best_eval_episode", -1)),
+        "best_eval_round": int(getattr(agent, "best_eval_round", -1)),
         "restored": bool(getattr(agent, "best_eval_restored", False)),
     }
 
@@ -580,7 +548,25 @@ def update_best_eval_tracking(agent, eval_average, eval_round_summary):
     if status.get("improved"):
         agent.best_eval_snapshot = copy.deepcopy(getattr(agent, "_best_model_snapshot", None))
         agent.best_eval_round = int(eval_round_summary.get("cycle_index", getattr(agent, "best_eval_round", -1)))
+        agent.best_eval_restored = False
     return status
+
+
+def sync_dashboard_eval_snapshot(dashboard, agent, episode_number=None):
+    latest_eval_avg = getattr(agent, "latest_eval_avg", None)
+    best_eval_avg = getattr(agent, "best_eval_avg", None)
+    if latest_eval_avg is None or best_eval_avg is None:
+        return False
+    latest_eval_avg = float(latest_eval_avg)
+    best_eval_avg = float(best_eval_avg)
+    if not np.isfinite(latest_eval_avg) or not np.isfinite(best_eval_avg):
+        return False
+    dashboard.record_evaluation_snapshot(
+        latest_eval_avg,
+        best_eval_avg,
+        episode_number=episode_number,
+    )
+    return True
 
 
 def run_parallel_greedy_evaluation(
@@ -639,6 +625,11 @@ def run_parallel_greedy_evaluation(
                 "eval_tail_episodes": int(max(1, int(num_episodes))),
             },
         )
+        sync_dashboard_eval_snapshot(
+            dashboard,
+            agent,
+            episode_number=completed_training_episodes,
+        )
         return {
             "scores": list(eval_scores),
             "episode_rewards": list(eval_episode_rewards),
@@ -664,14 +655,7 @@ def save_checkpoint(
 ):
     extra_state = {
         "reward_config": dashboard.reward_config,
-        "deep_history": {
-            "scores": list(dashboard.deep_scores),
-            "moving_avg": list(dashboard.deep_average_history),
-            "best_scores": list(dashboard.deep_best_history),
-            "episode_rewards": list(dashboard.deep_episode_rewards),
-            "losses": list(dashboard.deep_loss_history),
-            "loss_moving_avg": list(dashboard.deep_loss_average_history),
-        },
+        "deep_history": dashboard.export_deep_history(),
         "metrics_log_path": metrics_log_path,
         "last_transition": dict(last_transition or {}),
         "best_eval": get_best_eval_state(agent),
@@ -684,6 +668,34 @@ def save_checkpoint(
         },
     }
     agent.save(checkpoint_path, extra_state=extra_state)
+
+
+def _history_has_signal(values):
+    for value in values or []:
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(numeric_value) and abs(numeric_value) > 1e-9:
+            return True
+    return False
+
+
+def merge_deep_history(checkpoint_history, metrics_history):
+    checkpoint_history = dict(checkpoint_history or {})
+    metrics_history = dict(metrics_history or {})
+    if not checkpoint_history:
+        return dict(metrics_history)
+    merged = dict(metrics_history)
+    merged.update(checkpoint_history)
+    for key in ("eval_average", "eval_best"):
+        checkpoint_values = list(checkpoint_history.get(key, []))
+        metrics_values = list(metrics_history.get(key, []))
+        if _history_has_signal(metrics_values) and not _history_has_signal(checkpoint_values):
+            merged[key] = metrics_values
+        elif not checkpoint_values and metrics_values:
+            merged[key] = metrics_values
+    return merged
 
 
 def default_summary_image_path():
@@ -971,39 +983,6 @@ def build_live_train_info(train_info, session_perf, episode_steps):
     return info
 
 
-def build_training_context(
-    mode_label,
-    episode_reward,
-    train_info,
-    transition,
-    *,
-    trainer_mode="single",
-    parallel_envs=1,
-    parallel_phase="single",
-    eval_tail_episodes=DEFAULT_EVAL_TAIL_EPISODES,
-    fast_mode_requested=False,
-    fast_mode_effective=False,
-    fast_tail_episodes=5,
-    episodes_remaining=0,
-    **extra_context,
-):
-    return {
-        "mode_label": mode_label,
-        "episode_reward": episode_reward,
-        "train_info": train_info,
-        "transition": transition,
-        "trainer_mode": str(trainer_mode or DEFAULT_TRAINER_MODE),
-        "parallel_envs": int(max(1, parallel_envs)),
-        "parallel_phase": str(parallel_phase or "single"),
-        "eval_tail_episodes": int(max(1, eval_tail_episodes)),
-        "fast_mode_requested": bool(fast_mode_requested),
-        "fast_mode_effective": bool(fast_mode_effective),
-        "fast_tail_episodes": int(fast_tail_episodes),
-        "episodes_remaining": int(max(0, episodes_remaining)),
-        **extra_context,
-    }
-
-
 def build_dashboard_frame(
     game,
     dashboard,
@@ -1158,8 +1137,8 @@ def build_post_run_base_view(
         episodes_remaining=0,
         eval_scope="final_post_run",
         best_eval_avg=float(getattr(agent, "best_eval_avg", float("-inf"))),
-        best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
-        best_eval_restored=bool(getattr(agent, "best_eval_snapshot", None)),
+        best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", -1)),
+        best_eval_restored=bool(getattr(agent, "best_eval_restored", False)),
     )
     return build_dashboard_frame(
         game=game,
@@ -1356,10 +1335,6 @@ def ensure_baseline_history(
     return baseline_history
 
 
-def resolve_parallel_batch_size(device_type):
-    return PARALLEL_CUDA_BATCH_SIZE if str(device_type).strip().lower() == "cuda" else PARALLEL_CPU_BATCH_SIZE
-
-
 def resolve_parallel_env_count(device_type, requested_envs):
     if requested_envs is not None:
         return max(1, int(requested_envs))
@@ -1368,38 +1343,6 @@ def resolve_parallel_env_count(device_type, requested_envs):
 
 def resolve_parallel_batch_size(device_type):
     return PARALLEL_CUDA_BATCH_SIZE if str(device_type).strip().lower() == "cuda" else PARALLEL_CPU_BATCH_SIZE
-
-
-def configure_agent_for_mode(agent, trainer_mode):
-    trainer_mode = str(trainer_mode).strip().lower()
-    if trainer_mode == "parallel":
-        is_cuda = str(agent.device.type).strip().lower() == "cuda"
-        agent.configure_training_schedule(
-            batch_size=resolve_parallel_batch_size(agent.device.type),
-            warmup_size=PARALLEL_WARMUP_SIZE,
-            target_sync_interval=250,
-            update_every_transitions=(
-                PARALLEL_CUDA_UPDATE_EVERY_TRANSITIONS
-                if is_cuda
-                else PARALLEL_CPU_UPDATE_EVERY_TRANSITIONS
-            ),
-            gradient_steps_per_update=(
-                PARALLEL_CUDA_GRADIENT_STEPS_PER_UPDATE
-                if is_cuda
-                else PARALLEL_CPU_GRADIENT_STEPS_PER_UPDATE
-            ),
-            trainer_mode="parallel",
-        )
-        return
-
-    agent.configure_training_schedule(
-        batch_size=256,
-        warmup_size=1_000,
-        target_sync_interval=250,
-        update_every_transitions=1,
-        gradient_steps_per_update=1,
-        trainer_mode="single",
-    )
 
 
 def flush_metric_buffer(metrics_log_path, pending_entries):
@@ -1602,7 +1545,7 @@ def await_training_start(
             eval_interval_episodes=eval_interval_episodes,
             eval_interval_remaining=eval_interval_episodes,
             best_eval_avg=float(getattr(agent, "best_eval_avg", float("-inf"))),
-            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
+            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", -1)),
         )
         overlay_subtitle = (
             f"Parallel mode is the speed path: it will batch {dashboard.get_parallel_env_count()} environments and render only the evaluation tail."
@@ -1745,7 +1688,7 @@ def train_parallel_mode(
                 if best_eval_avg is not None
                 else getattr(agent, "best_eval_avg", float("-inf"))
             ),
-            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", {})),
+            best_eval_round=copy.deepcopy(getattr(agent, "best_eval_round", -1)),
             periodic_eval_rounds_completed=int(periodic_eval_rounds_completed),
             periodic_eval_remaining=(
                 None if periodic_eval_remaining is None else int(max(0, periodic_eval_remaining))
@@ -1956,7 +1899,7 @@ def train_parallel_mode(
         periodic_eval_rounds_completed = int(periodic_eval_rounds_completed)
 
         def run_due_periodic_evals():
-            nonlocal next_eval_checkpoint, periodic_eval_rounds_completed
+            nonlocal next_eval_checkpoint, periodic_eval_rounds_completed, finish_requested
             while completed_in_session() >= next_eval_checkpoint:
                 eval_summary = run_parallel_greedy_evaluation(
                     agent,
@@ -1968,12 +1911,16 @@ def train_parallel_mode(
                 periodic_eval_rounds_completed += 1
                 if not eval_summary.get("scores"):
                     return False
+                if agent.should_early_stop_on_eval_plateau():
+                    finish_requested = True
+                    return False
                 next_eval_checkpoint += max(1, int(eval_interval_episodes))
             return True
 
         responsive_chunk = max(4, min(16, parallel_envs // 4 if parallel_envs > 8 else parallel_envs))
         env_step_started = time.perf_counter()
         encode_elapsed = 0.0
+        alive_indices = []
 
         for env_index, env in enumerate(envs):
             reward, game_over, score = env.play_step(
@@ -1998,9 +1945,7 @@ def train_parallel_mode(
                     }
                 )
             else:
-                encode_started = time.perf_counter()
-                agent.encode_state(env, out=next_states_batch[env_index])
-                encode_elapsed += time.perf_counter() - encode_started
+                alive_indices.append(env_index)
 
             if (
                 game.render
@@ -2023,6 +1968,11 @@ def train_parallel_mode(
 
         if game.quit_requested:
             break
+        if alive_indices:
+            encode_started = time.perf_counter()
+            encoded_alive_states = agent.encode_states([envs[index] for index in alive_indices])
+            next_states_batch[np.asarray(alive_indices, dtype=np.int64)] = encoded_alive_states
+            encode_elapsed += time.perf_counter() - encode_started
         record_perf_timing(session_perf, "env_step", time.perf_counter() - env_step_started)
         if encode_elapsed > 0.0:
             record_perf_timing(session_perf, "encode", encode_elapsed)
@@ -2051,6 +2001,7 @@ def train_parallel_mode(
         session_perf["updates"] += int(train_info.get("update_count", 0))
 
         remaining_bulk_slots = max(0, bulk_target - completed_in_session())
+        reset_indices = []
         for record in completed_records[:remaining_bulk_slots]:
             current_run_number = completed_in_session() + 1
             agent.n_games += 1
@@ -2080,6 +2031,8 @@ def train_parallel_mode(
                     steps=record["steps"],
                     buffer_size=len(agent.replay_buffer),
                     best_score=best_score,
+                    latest_eval_avg=getattr(agent, "latest_eval_avg", None),
+                    best_eval_avg=getattr(agent, "best_eval_avg", None),
                 )
             )
             if len(pending_metric_entries) >= 8:
@@ -2094,11 +2047,15 @@ def train_parallel_mode(
                 env = envs[record["env_index"]]
                 env.reset()
                 env.set_reward_config(reward_config)
-                encode_started = time.perf_counter()
-                agent.encode_state(env, out=env_states[record["env_index"]])
-                record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
+                reset_indices.append(record["env_index"])
                 episode_rewards[record["env_index"]] = 0.0
                 episode_steps[record["env_index"]] = 0
+
+        if reset_indices:
+            encode_started = time.perf_counter()
+            encoded_reset_states = agent.encode_states([envs[index] for index in reset_indices])
+            env_states[np.asarray(reset_indices, dtype=np.int64)] = encoded_reset_states
+            record_perf_timing(session_perf, "encode", time.perf_counter() - encode_started)
 
         if not run_due_periodic_evals():
             break
@@ -2405,6 +2362,8 @@ def train_parallel_mode(
                 steps=step_count,
                 buffer_size=len(agent.replay_buffer),
                 best_score=best_score,
+                latest_eval_avg=getattr(agent, "latest_eval_avg", None),
+                best_eval_avg=getattr(agent, "best_eval_avg", None),
             ),
         )
         if agent.n_games % checkpoint_every == 0:
@@ -2443,6 +2402,11 @@ def train_parallel_mode(
                 "eval_tail_episodes": int(eval_tail_episodes),
             },
         )
+        sync_dashboard_eval_snapshot(
+            dashboard,
+            agent,
+            episode_number=completed_in_session(),
+        )
 
     flush_metric_buffer(metrics_log_path, pending_metric_entries)
     if finish_requested and not game.quit_requested:
@@ -2479,7 +2443,8 @@ def train_session(
         checkpoint_state = agent.load(checkpoint_path)
         initialize_best_eval_tracking(agent, checkpoint_state)
         print(f"Loaded checkpoint from {checkpoint_path}")
-    initialize_best_eval_tracking(agent, checkpoint_state)
+    else:
+        initialize_best_eval_tracking(agent, checkpoint_state)
 
     resolved_trainer_mode = resolve_trainer_mode_for_session(
         checkpoint_state,
@@ -2516,7 +2481,7 @@ def train_session(
         agent.reheat_patience,
     )
     initial_reward_config = checkpoint_state.get("reward_config", DEFAULT_REWARD_CONFIG)
-    deep_history = checkpoint_state.get("deep_history", deep_history)
+    deep_history = merge_deep_history(checkpoint_state.get("deep_history"), deep_history)
 
     game = SnakeGameAI(w=480, h=480, window_h=880, render=render, speed=speed)
     dashboard = TrainingDashboard(
@@ -2947,6 +2912,8 @@ def train_session(
                 steps=step_count,
                 buffer_size=len(agent.replay_buffer),
                 best_score=best_score,
+                latest_eval_avg=getattr(agent, "latest_eval_avg", None),
+                best_eval_avg=getattr(agent, "best_eval_avg", None),
             )
             queue_metric_entry(metrics_log_path, pending_metric_entries, metric_entry)
 
@@ -2990,7 +2957,6 @@ def train_session(
         flush_metric_buffer(metrics_log_path, pending_metric_entries)
         restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
         agent.best_eval_restored = True
-        restore_agent_weights(agent, getattr(agent, "best_eval_snapshot", None))
         save_checkpoint(
             agent,
             checkpoint_path,
@@ -3085,20 +3051,15 @@ def run_visualizer_session(checkpoint_path, metrics_log_path, speed, device_pref
                 sync_agent_device_from_dashboard(agent, dashboard, "viewer")
                 game.speed = dashboard.current_fps
                 action_info = agent.get_action_details(state, greedy=True)
+                best_eval_state = get_best_eval_state(agent)
                 context = build_training_context(
                     "Viewer",
                     episode_reward,
                     agent.last_train_info,
                     last_transition,
-                    best_eval_avg=float(
-                        checkpoint_state.get("best_eval", {}).get("best_eval_avg", float("-inf"))
-                    ),
-                    best_eval_round=copy.deepcopy(
-                        checkpoint_state.get("best_eval", {}).get("best_eval_round", {})
-                    ),
-                    best_eval_restored=bool(
-                        checkpoint_state.get("best_eval", {}).get("best_eval_snapshot")
-                    ),
+                    best_eval_avg=float(best_eval_state.get("best_eval_avg", float("-inf"))),
+                    best_eval_round=copy.deepcopy(best_eval_state.get("best_eval_round", -1)),
+                    best_eval_restored=bool(best_eval_state.get("restored", False)),
                 )
 
                 game.set_dashboard_data(
